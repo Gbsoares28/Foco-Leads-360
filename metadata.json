@@ -1,0 +1,6 @@
+{
+  "name": "Foco Leads 360",
+  "description": "Plataforma interna da Feed em Foco 360 para criação automática de minisites comerciais, prospecção, propostas e gestão de clientes.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,26 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --color-brand-navy: #10253D;
+  --color-brand-blue: #1677F2;
+  --color-brand-canvas: #F1F5F9;
+}
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+    color: #10253D;
+    background-color: #F1F5F9;
+  }
+
+  h1, h2, h3, h4, .font-display {
+    font-family: var(--font-display);
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
