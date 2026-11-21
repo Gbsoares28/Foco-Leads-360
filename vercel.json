@@ -29,6 +29,22 @@
       "destination": "/sw.js"
     },
     {
+      "source": "/api/public/:path*",
+      "destination": "https://foco-leads-360.ai.studio/api/public/:path*"
+    },
+    {
+      "source": "/api/google/place-photo",
+      "destination": "https://foco-leads-360.ai.studio/api/google/place-photo"
+    },
+    {
+      "source": "/uploads/:path*",
+      "destination": "https://foco-leads-360.ai.studio/uploads/:path*"
+    },
+    {
+      "source": "/q/:code",
+      "destination": "https://foco-leads-360.ai.studio/q/:code"
+    },
+    {
       "source": "/LinkFoco/:slug",
       "destination": "/index.html"
     },
@@ -66,6 +82,15 @@
           "key": "Cache-Control",
           "value": "no-store, max-age=0"
         },
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        }
+      ]
+    },
+    {
+      "source": "/([a-z0-9-]{3,64})",
+      "headers": [
         {
           "key": "X-Content-Type-Options",
           "value": "nosniff"
