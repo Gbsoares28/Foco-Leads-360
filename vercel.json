@@ -45,6 +45,10 @@
       "destination": "https://foco-leads-360.ai.studio/q/:code"
     },
     {
+      "source": "/api/:path*",
+      "destination": "https://foco-leads-360.ai.studio/api/:path*"
+    },
+    {
       "source": "/LinkFoco/:slug",
       "destination": "/index.html"
     },
