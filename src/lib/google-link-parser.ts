@@ -111,7 +111,7 @@ export async function safeResolveGoogleMapsLink(rawInput: string): Promise<Parse
     for (let hop = 0; hop < 5; hop++) {
       try {
         const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 4500);
+        const timer = setTimeout(() => controller.abort(), 2500);
         const response = await fetch(currentUrl.toString(), {
           method: 'GET',
           redirect: 'manual',

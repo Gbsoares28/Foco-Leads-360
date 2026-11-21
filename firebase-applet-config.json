@@ -3,6 +3,7 @@
   "appId": "1:391036156219:web:374b33a911cc49ee18df1e",
   "apiKey": "AIzaSyBEhkTvFsypsL-MP2ZId7oX296wINZQ-Gg",
   "authDomain": "dub-handbook-mwh20.firebaseapp.com",
+  "firestoreDatabaseId": "ai-studio-focoleads360-6c545860-e2fd-4691-92d9-84820edfc659",
   "storageBucket": "dub-handbook-mwh20.firebasestorage.app",
   "messagingSenderId": "391036156219",
   "measurementId": "",

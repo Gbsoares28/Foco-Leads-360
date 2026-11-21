@@ -13,6 +13,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { buildPublicMinisiteUrl } from '../lib/slug-utils';
 
 interface QrCodeItem {
   id: number;
@@ -33,6 +34,7 @@ interface MinisiteOption {
   id: number;
   title: string;
   slug: string;
+  status?: string;
   businessId: number;
   businessName: string;
   businessWhatsapp: string;
@@ -82,7 +84,7 @@ function QrPreviewImage({ url, label }: { url: string; label: string }) {
 }
 
 export function QrCodesView() {
-  const { apiFetch, showDemoData, isDemoSession, profile, signInWithGoogle } = useAuth();
+  const { apiFetch, showDemoData, isDemoSession, profile, logout } = useAuth();
 
   const [items, setItems] = useState<QrCodeItem[]>([]);
   const [minisites, setMinisites] = useState<MinisiteOption[]>([]);
@@ -134,7 +136,9 @@ export function QrCodesView() {
     const defaultUrl =
       form.destinationType === 'whatsapp' && selected.businessWhatsapp
         ? `https://wa.me/${selected.businessWhatsapp.replace(/\D/g, '')}`
-        : `${window.location.origin}/demo/${selected.slug}`;
+        : selected?.slug
+          ? buildPublicMinisiteUrl(selected.slug)
+          : '';
 
     setForm((f) => ({
       ...f,
@@ -276,8 +280,8 @@ export function QrCodesView() {
         <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700 flex items-center justify-between gap-2">
           <span>{error}</span>
           {(isDemoSession || !profile) && (
-            <button type="button" onClick={signInWithGoogle} className="underline font-semibold cursor-pointer">
-              Entrar com Google
+            <button type="button" onClick={logout} className="underline font-semibold cursor-pointer">
+              Ir para login
             </button>
           )}
         </div>
@@ -317,7 +321,7 @@ export function QrCodesView() {
                 <option value="">Selecionar manualmente</option>
                 {minisites.map((m) => (
                   <option key={m.id} value={m.id}>
-                    {m.title}
+                    {m.title} (/{m.slug}{m.status === 'publicado' ? ' · publicado' : ''})
                   </option>
                 ))}
               </select>

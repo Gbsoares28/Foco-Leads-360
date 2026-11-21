@@ -426,7 +426,7 @@ export async function getOperatorSettings(profileId?: number | null) {
       operatorCity: '',
       sitePriceLabel: 'R$ 97/mês',
       platePriceLabel: 'R$ 79,00',
-      baseDomain: process.env.MINISITE_BASE_DOMAIN || 'focoleads360.com.br',
+      baseDomain: process.env.MINISITE_BASE_DOMAIN || 'linkfoco.vercel.app',
       whatsappConnected: false,
     };
   }
@@ -442,7 +442,7 @@ export async function getOperatorSettings(profileId?: number | null) {
       operatorCity: '',
       sitePriceLabel: 'R$ 97/mês',
       platePriceLabel: 'R$ 79,00',
-      baseDomain: process.env.MINISITE_BASE_DOMAIN || 'focoleads360.com.br',
+      baseDomain: process.env.MINISITE_BASE_DOMAIN || 'linkfoco.vercel.app',
       whatsappConnected: false,
     }
   );
@@ -474,7 +474,7 @@ export async function upsertOperatorSettings(
         operatorCity: patch.operatorCity ?? '',
         sitePriceLabel: patch.sitePriceLabel ?? 'R$ 97/mês',
         platePriceLabel: patch.platePriceLabel ?? 'R$ 79,00',
-        baseDomain: patch.baseDomain ?? (process.env.MINISITE_BASE_DOMAIN || 'focoleads360.com.br'),
+        baseDomain: patch.baseDomain ?? (process.env.MINISITE_BASE_DOMAIN || 'linkfoco.vercel.app'),
         whatsappConnected: patch.whatsappConnected ?? false,
       })
       .returning();

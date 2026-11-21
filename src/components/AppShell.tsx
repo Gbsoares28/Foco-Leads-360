@@ -100,7 +100,6 @@ export function AppShell({ currentPath, onNavigate, children }: AppShellProps) {
     showDemoData,
     setShowDemoData,
     logout,
-    signInWithGoogle,
   } = useAuth();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
@@ -198,13 +197,13 @@ export function AppShell({ currentPath, onNavigate, children }: AppShellProps) {
           </div>
         ) : (
           <div className="space-y-2">
-            <div className="text-xs text-slate-300">Modo Demonstração ativo</div>
+            <div className="text-xs text-slate-300">Sessão restrita</div>
             <button
               type="button"
-              onClick={signInWithGoogle}
+              onClick={logout}
               className="w-full px-3 py-2 rounded-lg bg-[#1677F2] hover:bg-[#1262CA] text-white text-xs font-semibold transition-colors cursor-pointer"
             >
-              Entrar com Google
+              Ir para login
             </button>
           </div>
         )}
@@ -296,23 +295,13 @@ export function AppShell({ currentPath, onNavigate, children }: AppShellProps) {
               <strong>Modo Demonstração:</strong> exibindo exclusivamente empresas e minisites
               demonstrativos separados da base real.
             </span>
-            {isDemoSession ? (
-              <button
-                type="button"
-                onClick={signInWithGoogle}
-                className="underline font-semibold text-sky-300 hover:text-white cursor-pointer"
-              >
-                Entrar com Google para operar em Produção
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={() => setShowDemoData(false)}
-                className="underline font-semibold text-sky-300 hover:text-white cursor-pointer"
-              >
-                Voltar para base real
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={() => setShowDemoData(false)}
+              className="underline font-semibold text-sky-300 hover:text-white cursor-pointer"
+            >
+              Voltar para base real
+            </button>
           </div>
         )}
 

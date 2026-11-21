@@ -1,16 +1,22 @@
 import { useEffect, useState } from 'react';
 import { ArrowLeft, Monitor, Smartphone } from 'lucide-react';
+import { useAuth } from '../contexts/AuthContext';
 import { MinisiteRenderer, type RenderableMinisite } from '../components/MinisiteRenderer';
+import { buildPublicMinisitePath, buildPublicMinisiteUrl } from '../lib/slug-utils';
 
 export function MinisitePublicPreview({
   slug,
+  mode = 'demo',
   onBack,
 }: {
   slug: string;
+  mode?: 'public' | 'demo';
   onBack: () => void;
 }) {
+  const { profile, isDemoSession } = useAuth();
+  const isStaffSession = Boolean(profile || isDemoSession);
+
   const [minisite, setMinisite] = useState<RenderableMinisite | null>(null);
-  const [baseDomain, setBaseDomain] = useState('focoleads360.com.br');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [viewport, setViewport] = useState<'mobile' | 'desktop'>('mobile');
@@ -18,33 +24,84 @@ export function MinisitePublicPreview({
   useEffect(() => {
     let active = true;
     setLoading(true);
-    fetch(`/api/public/minisite/${encodeURIComponent(slug)}`)
-      .then(async (res) => {
-        const json = await res.json();
-        if (!res.ok) throw new Error(json.error || 'Minisite indisponível.');
-        return json;
-      })
+    setError(null);
+
+    const visited = new Set<string>();
+
+    async function loadMinisite(currentSlug: string) {
+      const normalized = currentSlug.trim().toLowerCase();
+      if (visited.has(normalized)) {
+        throw new Error('Ciclo de redirecionamento detectado para este endereço.');
+      }
+      visited.add(normalized);
+
+      const endpoint =
+        mode === 'public'
+          ? `/api/public/site/${encodeURIComponent(normalized)}`
+          : `/api/public/minisite/${encodeURIComponent(normalized)}`;
+
+      const res = await fetch(endpoint);
+      const json = await res.json();
+      if (!res.ok) {
+        throw new Error(json.error || 'Minisite não encontrado ou não publicado.');
+      }
+
+      if (mode === 'public' && json.redirect && json.targetSlug) {
+        const target = String(json.targetSlug).trim().toLowerCase();
+        const search = window.location.search || '';
+        const nextPath = `${buildPublicMinisitePath(target)}${search}`;
+        if (window.location.pathname + window.location.search !== nextPath) {
+          window.history.replaceState({}, '', nextPath);
+        }
+        return loadMinisite(target);
+      }
+
+      return json as { minisite: RenderableMinisite; publicUrl?: string };
+    }
+
+    loadMinisite(slug)
       .then((data) => {
-        if (active) {
-          setMinisite(data.minisite);
-          if (data.baseDomain) setBaseDomain(data.baseDomain);
+        if (!active) return;
+        setMinisite(data.minisite);
+        if (data.minisite?.title) {
+          document.title = data.minisite?.seo?.title || data.minisite.title;
+        }
+        if (mode === 'public' && data.minisite?.slug) {
+          const canonicalPath = buildPublicMinisitePath(data.minisite.slug);
+          const expectedFullPath = `${canonicalPath}${window.location.search || ''}`;
+          if (window.location.pathname + (window.location.search || '') !== expectedFullPath) {
+            window.history.replaceState({}, '', expectedFullPath);
+          }
+          const canonicalHref =
+            data.publicUrl || buildPublicMinisiteUrl(data.minisite.slug);
+          let link = document.querySelector<HTMLLinkElement>('link[rel="canonical"]');
+          if (!link) {
+            link = document.createElement('link');
+            link.rel = 'canonical';
+            document.head.appendChild(link);
+          }
+          link.href = canonicalHref;
         }
       })
       .catch((err) => {
-        if (active) setError(err instanceof Error ? err.message : 'Erro ao carregar prévia.');
+        if (active) {
+          setMinisite(null);
+          setError(err instanceof Error ? err.message : 'Minisite não encontrado.');
+        }
       })
       .finally(() => {
         if (active) setLoading(false);
       });
+
     return () => {
       active = false;
     };
-  }, [slug]);
+  }, [slug, mode]);
 
   if (loading) {
     return (
       <div className="min-h-screen bg-[#F1F5F9] flex items-center justify-center p-6">
-        <div className="w-full max-w-sm h-[600px] bg-white rounded-3xl border border-slate-200 animate-pulse" />
+        <div className="w-full max-w-[420px] h-[640px] bg-white rounded-3xl border border-slate-200 animate-pulse" />
       </div>
     );
   }
@@ -52,16 +109,38 @@ export function MinisitePublicPreview({
   if (error || !minisite) {
     return (
       <div className="min-h-screen bg-[#F1F5F9] flex items-center justify-center p-6">
-        <div className="max-w-md w-full bg-white border border-slate-200 rounded-xl p-8 text-center">
-          <h1 className="text-lg font-bold text-[#10253D]">Minisite indisponível</h1>
-          <p className="mt-2 text-sm text-slate-600">{error || 'Página não encontrada.'}</p>
-          <button
-            type="button"
-            onClick={onBack}
-            className="mt-6 px-4 py-2 rounded-lg bg-[#1677F2] text-white text-sm font-semibold cursor-pointer"
-          >
-            Voltar ao painel
-          </button>
+        <div className="max-w-md w-full bg-white border border-slate-200 rounded-2xl p-8 text-center shadow-sm">
+          <div className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
+            404 · Página indisponível
+          </div>
+          <h1 className="text-lg font-bold text-[#10253D]">
+            Minisite não encontrado ou não publicado
+          </h1>
+          <p className="mt-2 text-sm text-slate-600">
+            {error || 'O endereço solicitado não corresponde a um minisite ativo no momento.'}
+          </p>
+          {isStaffSession && (
+            <button
+              type="button"
+              onClick={onBack}
+              className="mt-6 px-4 py-2 rounded-lg bg-[#1677F2] text-white text-sm font-semibold cursor-pointer"
+            >
+              Voltar ao painel
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  if (mode === 'public') {
+    return (
+      <div
+        className="min-h-screen w-full flex justify-center sm:py-6 sm:px-4"
+        style={{ backgroundColor: minisite.theme?.backgroundColor || '#FAF5ED' }}
+      >
+        <div className="w-full max-w-[460px] min-h-screen sm:min-h-0 sm:rounded-3xl overflow-hidden flex flex-col">
+          <MinisiteRenderer minisite={minisite} />
         </div>
       </div>
     );
@@ -82,7 +161,7 @@ export function MinisitePublicPreview({
           </button>
           <span className="text-slate-300">|</span>
           <span className="text-xs font-mono text-slate-600 truncate">
-            {minisite.slug}.{baseDomain}
+            {buildPublicMinisitePath(minisite.slug)}
           </span>
         </div>
 
@@ -114,7 +193,7 @@ export function MinisitePublicPreview({
       {minisite.status !== 'publicado' && (
         <div className="bg-[#10253D] text-white text-center px-4 py-2 text-xs">
           Prévia privada ({minisite.status === 'demonstracao' ? 'Modo Demonstração' : 'Rascunho'}) ·
-          Não indexada em mecanismos de busca · Feed em Foco 360
+          Não indexada em mecanismos de busca · Foco Leads 360
         </div>
       )}
 

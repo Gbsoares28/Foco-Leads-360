@@ -3,14 +3,14 @@ import { Bell, CheckCircle2, Save } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 
 export function ConfiguracoesView() {
-  const { apiFetch, isDemoSession, profile, signInWithGoogle } = useAuth();
+  const { apiFetch, isDemoSession, profile, logout } = useAuth();
 
   const [form, setForm] = useState({
     operatorName: '',
     operatorCity: '',
     sitePriceLabel: 'R$ 97/mês',
     platePriceLabel: 'R$ 79,00',
-    baseDomain: 'focoleads360.com.br',
+    baseDomain: 'linkfoco.vercel.app',
     whatsappConnected: false,
   });
   const [loading, setLoading] = useState(true);
@@ -41,7 +41,7 @@ export function ConfiguracoesView() {
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isDemoSession || !profile) {
-      setError('Entre com sua conta Google corporativa para salvar as configurações.');
+      setError('Entre com o administrador autorizado para salvar as configurações.');
       return;
     }
     setSaving(true);
@@ -91,8 +91,8 @@ export function ConfiguracoesView() {
         <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700 flex items-center justify-between gap-2">
           <span>{error}</span>
           {(isDemoSession || !profile) && (
-            <button type="button" onClick={signInWithGoogle} className="underline font-semibold cursor-pointer">
-              Entrar com Google
+            <button type="button" onClick={logout} className="underline font-semibold cursor-pointer">
+              Ir para login
             </button>
           )}
         </div>
@@ -162,16 +162,53 @@ export function ConfiguracoesView() {
             />
           </div>
 
-          <div className="sm:col-span-2">
-            <label className="block text-xs font-semibold text-[#10253D] mb-1">
-              Domínio base dos subdomínios oficiais
-            </label>
-            <input
-              type="text"
-              value={form.baseDomain}
-              onChange={(e) => setForm((f) => ({ ...f, baseDomain: e.target.value }))}
-              className="w-full px-3.5 py-2.5 rounded-lg border border-slate-300 text-sm font-mono text-[#10253D]"
-            />
+          <div className="sm:col-span-2 space-y-3">
+            <div>
+              <label className="block text-xs font-semibold text-[#10253D] mb-1">
+                Domínio público padrão dos minisites (ex: linkfoco.vercel.app)
+              </label>
+              <input
+                type="text"
+                value={form.baseDomain}
+                onChange={(e) =>
+                  setForm((f) => ({
+                    ...f,
+                    baseDomain: e.target.value
+                      .replace(/^https?:\/\//i, '')
+                      .replace(/\/.*$/, '')
+                      .trim()
+                      .toLowerCase(),
+                  }))
+                }
+                placeholder="linkfoco.vercel.app"
+                className="w-full px-3.5 py-2.5 rounded-lg border border-slate-300 text-sm font-mono text-[#10253D]"
+              />
+            </div>
+
+            <div className="px-3.5 py-3 rounded-lg border border-slate-200 bg-slate-50 text-xs text-slate-600 space-y-1.5">
+              <div>
+                Padrão público canônico:{' '}
+                <code className="font-mono text-[#10253D] font-semibold">
+                  https://{form.baseDomain || 'linkfoco.vercel.app'}/nosso-pet-favorito
+                </code>
+              </div>
+              <div>
+                Prévia local ativa neste ambiente:{' '}
+                <code className="font-mono text-[#1677F2] font-semibold">
+                  {window.location.origin}/nosso-pet-favorito
+                </code>
+              </div>
+              <div>
+                Compatibilidade preservada:{' '}
+                <code className="font-mono text-slate-700 font-semibold">
+                  /LinkFoco/nosso-pet-favorito · /s/nosso-pet-favorito · /demo/nosso-pet-favorito
+                </code>
+              </div>
+              <p className="text-[11px] text-slate-500 pt-1">
+                Todos os minisites são publicados dinamicamente sob <code className="font-mono">/&lt;slug&gt;</code>, sem domínio individual por cliente nem redeploy ao trocar slug (slugs antigos e links legados <code className="font-mono">/LinkFoco/&lt;slug&gt;</code> ou <code className="font-mono">/s/&lt;slug&gt;</code> redirecionam automaticamente preservando parâmetros). Para servir em{' '}
+                <strong className="font-mono">{form.baseDomain || 'linkfoco.vercel.app'}</strong>, publique apenas as rotas públicas na Vercel conforme <code className="font-mono">docs/VERCEL_PUBLIC_SETUP.md</code> e defina <code className="font-mono">PUBLIC_BASE_URL=https://{form.baseDomain || 'linkfoco.vercel.app'}</code> e <code className="font-mono">VITE_PUBLIC_BASE_URL=https://{form.baseDomain || 'linkfoco.vercel.app'}</code>.
+              </p>
+            </div>
           </div>
         </div>
 

@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { interpolateScriptVariables, SCRIPT_VARIABLES } from '../lib/default-scripts';
+import { buildPublicMinisiteUrl } from '../lib/slug-utils';
 
 interface CommercialScript {
   id: number;
@@ -41,17 +42,19 @@ interface OperatorSettings {
 }
 
 export function ScriptsView() {
-  const { apiFetch, showDemoData, isDemoSession, profile, signInWithGoogle } = useAuth();
+  const { apiFetch, showDemoData, isDemoSession, profile, logout } = useAuth();
 
   const [scripts, setScripts] = useState<CommercialScript[]>([]);
   const [businesses, setBusinesses] = useState<BusinessOption[]>([]);
-  const [minisites, setMinisites] = useState<Array<{ businessId: number; slug: string }>>([]);
+  const [minisites, setMinisites] = useState<
+    Array<{ businessId: number; slug: string; status?: string }>
+  >([]);
   const [settings, setSettings] = useState<OperatorSettings>({
     operatorName: '',
     operatorCity: '',
     sitePriceLabel: 'R$ 97/mês',
     platePriceLabel: 'R$ 79,00',
-    baseDomain: 'focoleads360.com.br',
+    baseDomain: 'linkfoco.com.br',
   });
 
   const [selectedBusinessId, setSelectedBusinessId] = useState<string>('');
@@ -78,7 +81,7 @@ export function ScriptsView() {
         apiFetch<{ scripts: CommercialScript[] }>('/api/scripts'),
         apiFetch<{ settings: OperatorSettings }>('/api/settings'),
         apiFetch<{ items: BusinessOption[] }>(`/api/businesses?demo=${showDemoData}`),
-        apiFetch<{ items: Array<{ businessId: number; slug: string }> }>(
+        apiFetch<{ items: Array<{ businessId: number; slug: string; status?: string }> }>(
           `/api/minisites?demo=${showDemoData}&pageSize=50`
         ),
       ]);
@@ -134,9 +137,11 @@ export function ScriptsView() {
         meu_nome: settings.operatorName,
         minha_cidade: settings.operatorCity,
         negocio: selectedBiz?.name || 'Nosso Pet Favorito',
-        link_site: linkedMs
-          ? `${window.location.origin}/demo/${linkedMs.slug}`
-          : `${window.location.origin}/demo/exemplo`,
+        link_site: linkedMs?.slug
+          ? linkedMs.status === 'publicado'
+            ? buildPublicMinisiteUrl(linkedMs.slug)
+            : `${window.location.origin}/demo/${linkedMs.slug}`
+          : buildPublicMinisiteUrl('nosso-pet-favorito'),
         preco_site: settings.sitePriceLabel,
         avaliacoes: typeof meta.userRatingCount === 'number' ? meta.userRatingCount : 38,
         nota: typeof meta.rating === 'number' ? meta.rating.toFixed(1) : '4.9',
@@ -293,8 +298,8 @@ export function ScriptsView() {
         <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700 flex items-center justify-between gap-2">
           <span>{error}</span>
           {(isDemoSession || !profile) && (
-            <button type="button" onClick={signInWithGoogle} className="underline font-semibold cursor-pointer">
-              Entrar com Google
+            <button type="button" onClick={logout} className="underline font-semibold cursor-pointer">
+              Ir para login
             </button>
           )}
         </div>

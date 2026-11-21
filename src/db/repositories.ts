@@ -1,4 +1,4 @@
-import { and, count, desc, eq, ilike, or, sql } from 'drizzle-orm';
+import { and, count, desc, eq, ilike, ne, or, sql } from 'drizzle-orm';
 import { db } from './index.ts';
 import {
   auditLogs,
@@ -6,8 +6,10 @@ import {
   clients,
   financialEntries,
   generationJobs,
+  mediaAssets,
   minisiteBlocks,
   minisiteEvents,
+  minisiteSlugAliases,
   minisites,
   minisiteVersions,
   opportunities,
@@ -19,39 +21,60 @@ import {
   type UserRole,
 } from './schema.ts';
 
+import {
+  buildSlugBaseFromTitle,
+  formatSlugWithSuffix,
+  isReservedSlug,
+  validateSlug,
+} from '../lib/slug-utils.ts';
+
 export type ProfileRecord = typeof profiles.$inferSelect;
 
-function sanitizeSlug(raw: string): string {
-  const base = raw
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 48);
-  return base || 'empresa-foco';
+export class SlugValidationError extends Error {
+  status: number;
+  constructor(message: string, status = 400) {
+    super(message);
+    this.status = status;
+  }
 }
 
-export async function generateUniqueSlug(title: string, isDemo: boolean): Promise<string> {
-  try {
-    const base = sanitizeSlug(title);
-    const candidateBase = isDemo && !base.endsWith('-demo') ? `${base}-demo` : base;
-    let candidate = candidateBase;
-    let suffix = 1;
+function isPgUniqueViolation(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const e = error as { code?: string; cause?: { code?: string } };
+  return e.code === '23505' || e.cause?.code === '23505';
+}
 
-    while (suffix < 50) {
-      const existing = await db
-        .select({ id: minisites.id })
-        .from(minisites)
-        .where(eq(minisites.slug, candidate))
-        .limit(1);
-      if (existing.length === 0) {
-        return candidate;
+export async function generateUniqueSlug(
+  title: string,
+  isDemo: boolean,
+  startSuffix = 1
+): Promise<string> {
+  try {
+    const candidateBase = buildSlugBaseFromTitle(title, isDemo);
+    let suffix = Math.max(1, startSuffix);
+
+    while (suffix < 100) {
+      const candidate = formatSlugWithSuffix(candidateBase, suffix);
+      if (!isReservedSlug(candidate)) {
+        const [existingPrimary, existingAlias] = await Promise.all([
+          db
+            .select({ id: minisites.id })
+            .from(minisites)
+            .where(eq(minisites.slug, candidate))
+            .limit(1),
+          db
+            .select({ id: minisiteSlugAliases.id })
+            .from(minisiteSlugAliases)
+            .where(eq(minisiteSlugAliases.aliasSlug, candidate))
+            .limit(1),
+        ]);
+        if (existingPrimary.length === 0 && existingAlias.length === 0) {
+          return candidate;
+        }
       }
       suffix += 1;
-      candidate = `${candidateBase}-${suffix}`;
     }
-    return `${candidateBase}-${Date.now().toString(36)}`;
+    return formatSlugWithSuffix(`${candidateBase}-${Date.now().toString(36)}`, 1);
   } catch (error) {
     console.error('Erro ao gerar slug único:', error);
     throw new Error('Não foi possível gerar um identificador único para o minisite.', {
@@ -66,6 +89,11 @@ export async function getOrCreateProfile(params: {
   fullName: string;
 }): Promise<ProfileRecord> {
   try {
+    const normalizedEmail = params.email.trim().toLowerCase();
+    if (normalizedEmail !== 'gabrieltreinadordeanimais@gmail.com') {
+      throw new Error('Acesso bloqueado: e-mail não autorizado para acesso ao sistema.');
+    }
+
     const existing = await db
       .select()
       .from(profiles)
@@ -76,40 +104,39 @@ export async function getOrCreateProfile(params: {
       const updated = await db
         .update(profiles)
         .set({
-          email: params.email,
+          email: normalizedEmail,
           fullName: params.fullName || existing[0].fullName,
+          role: 'administrador',
         })
         .where(eq(profiles.uid, params.uid))
         .returning();
       return updated[0];
     }
 
-    const totalCount = await db.select({ value: count() }).from(profiles);
-    const isFirstUser = Number(totalCount[0]?.value ?? 0) === 0;
-    const isOwnerEmail =
-      params.email.toLowerCase() === 'gabrieltreinadordeanimais@gmail.com';
-    const initialRole: UserRole =
-      isFirstUser || isOwnerEmail ? 'administrador' : 'consultor_comercial';
-
     const inserted = await db
       .insert(profiles)
       .values({
         uid: params.uid,
-        email: params.email,
-        fullName: params.fullName,
-        role: initialRole,
+        email: normalizedEmail,
+        fullName: params.fullName || 'Administrador',
+        role: 'administrador',
         active: true,
       })
       .onConflictDoUpdate({
         target: profiles.uid,
-        set: { email: params.email },
+        set: { email: normalizedEmail, role: 'administrador' },
       })
       .returning();
 
     return inserted[0];
   } catch (error) {
     console.error('Erro ao sincronizar perfil:', error);
-    throw new Error('Falha ao carregar perfil do colaborador.', { cause: error });
+    throw new Error(
+      error instanceof Error && error.message.includes('Acesso bloqueado')
+        ? error.message
+        : 'Falha ao carregar perfil do colaborador.',
+      { cause: error }
+    );
   }
 }
 
@@ -351,6 +378,7 @@ export async function listMinisites(params: {
         viewsCount: minisites.viewsCount,
         isDemo: minisites.isDemo,
         publicationAuthorizedAt: minisites.publicationAuthorizedAt,
+        publishedAt: minisites.publishedAt,
         createdAt: minisites.createdAt,
         updatedAt: minisites.updatedAt,
         businessName: businesses.name,
@@ -358,6 +386,7 @@ export async function listMinisites(params: {
         businessCity: businesses.city,
         businessPhone: businesses.phone,
         businessWhatsapp: businesses.whatsapp,
+        businessGooglePlaceId: businesses.googlePlaceId,
       })
       .from(minisites)
       .innerJoin(businesses, eq(minisites.businessId, businesses.id))
@@ -374,8 +403,17 @@ export async function listMinisites(params: {
 
     const total = Number(totalRes?.value ?? 0);
 
+    const items = rows.map((row) => ({
+      ...row,
+      hasUnpublishedChanges: Boolean(
+        row.status === 'publicado' &&
+          row.publishedAt &&
+          new Date(row.updatedAt).getTime() > new Date(row.publishedAt).getTime() + 1000
+      ),
+    }));
+
     return {
-      items: rows,
+      items,
       pagination: {
         page,
         pageSize,
@@ -434,8 +472,23 @@ export async function getMinisiteDetail(params: {
       .where(eq(minisiteBlocks.minisiteId, record.minisite.id))
       .orderBy(minisiteBlocks.position);
 
+    const hasUnpublishedChanges = Boolean(
+      record.minisite.status === 'publicado' &&
+        record.minisite.publishedAt &&
+        new Date(record.minisite.updatedAt).getTime() >
+          new Date(record.minisite.publishedAt).getTime() + 1000
+    );
+
+    const slugAliasesRows = await db
+      .select({ aliasSlug: minisiteSlugAliases.aliasSlug })
+      .from(minisiteSlugAliases)
+      .where(eq(minisiteSlugAliases.minisiteId, record.minisite.id))
+      .orderBy(desc(minisiteSlugAliases.createdAt));
+
     return {
       ...record.minisite,
+      hasUnpublishedChanges,
+      slugAliases: slugAliasesRows.map((a) => a.aliasSlug),
       business: record.business,
       blocks,
     };
@@ -523,6 +576,46 @@ export async function createBusinessRecord(params: {
   }
 }
 
+export async function getBusinessById(id: number) {
+  const rows = await db.select().from(businesses).where(eq(businesses.id, id)).limit(1);
+  return rows[0] ?? null;
+}
+
+export async function updateBusinessGoogleData(params: {
+  businessId: number;
+  address?: string;
+  phone?: string;
+  website?: string;
+  googleMapsUrl?: string;
+  googlePlaceId?: string;
+  sourceMetadataPatch?: Record<string, unknown>;
+}) {
+  const existing = await getBusinessById(params.businessId);
+  if (!existing) return null;
+
+  const currentMeta = (existing.sourceMetadata as Record<string, unknown>) || {};
+  const mergedMeta = params.sourceMetadataPatch
+    ? { ...currentMeta, ...params.sourceMetadataPatch }
+    : currentMeta;
+
+  const updates: Partial<typeof businesses.$inferInsert> = {
+    sourceMetadata: mergedMeta,
+  };
+  if (params.address && !existing.address) updates.address = params.address;
+  if (params.phone && !existing.phone) updates.phone = params.phone;
+  if (params.website && !existing.website) updates.website = params.website;
+  if (params.googleMapsUrl) updates.googleMapsUrl = params.googleMapsUrl;
+  if (params.googlePlaceId) updates.googlePlaceId = params.googlePlaceId;
+
+  const [updated] = await db
+    .update(businesses)
+    .set(updates)
+    .where(eq(businesses.id, params.businessId))
+    .returning();
+
+  return updated ?? null;
+}
+
 export async function createMinisiteRecord(params: {
   businessId: number;
   title: string;
@@ -535,58 +628,79 @@ export async function createMinisiteRecord(params: {
   actorId: number | null;
 }) {
   try {
-    const slug = await generateUniqueSlug(params.title, params.isDemo);
+    let minisite: typeof minisites.$inferSelect | null = null;
+    let lastError: unknown = null;
 
-    const inserted = await db
-      .insert(minisites)
-      .values({
-        businessId: params.businessId,
-        title: params.title,
-        slug,
-        status: params.status,
-        templateId: params.templateId,
-        theme: params.theme,
-        seo: params.seo,
-        viewsCount: 0,
-        isDemo: params.isDemo,
+    for (let attempt = 1; attempt <= 8; attempt += 1) {
+      const slug = await generateUniqueSlug(params.title, params.isDemo, attempt);
+      try {
+        const inserted = await db
+          .insert(minisites)
+          .values({
+            businessId: params.businessId,
+            title: params.title,
+            slug,
+            status: params.status,
+            templateId: params.templateId,
+            theme: params.theme,
+            seo: params.seo,
+            viewsCount: 0,
+            isDemo: params.isDemo,
+            createdBy: params.actorId,
+          })
+          .returning();
+        minisite = inserted[0];
+        break;
+      } catch (err) {
+        lastError = err;
+        if (isPgUniqueViolation(err) && attempt < 8) {
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    if (!minisite || !minisite.slug) {
+      throw lastError || new Error('Falha ao alocar slug único para o minisite.');
+    }
+
+    const postInserts: Array<Promise<unknown>> = [
+      db.insert(minisiteVersions).values({
+        minisiteId: minisite.id,
+        version: 1,
+        snapshot: {
+          title: minisite.title,
+          templateId: minisite.templateId,
+          theme: minisite.theme,
+          seo: minisite.seo,
+          blocks: params.blocks,
+        },
         createdBy: params.actorId,
-      })
-      .returning();
-
-    const minisite = inserted[0];
+      }),
+      db.insert(auditLogs).values({
+        actorId: params.actorId,
+        action: 'minisite.created',
+        entityType: 'minisite',
+        entityId: String(minisite.id),
+        metadata: { slug: minisite.slug, status: minisite.status, isDemo: params.isDemo },
+      }),
+    ];
 
     if (params.blocks.length > 0) {
-      await db.insert(minisiteBlocks).values(
-        params.blocks.map((block, index) => ({
-          minisiteId: minisite.id,
-          blockType: block.blockType,
-          position: index,
-          visible: block.visible,
-          content: block.content,
-        }))
+      postInserts.push(
+        db.insert(minisiteBlocks).values(
+          params.blocks.map((block, index) => ({
+            minisiteId: minisite.id,
+            blockType: block.blockType,
+            position: index,
+            visible: block.visible,
+            content: block.content,
+          }))
+        )
       );
     }
 
-    await db.insert(minisiteVersions).values({
-      minisiteId: minisite.id,
-      version: 1,
-      snapshot: {
-        title: minisite.title,
-        templateId: minisite.templateId,
-        theme: minisite.theme,
-        seo: minisite.seo,
-        blocks: params.blocks,
-      },
-      createdBy: params.actorId,
-    });
-
-    await db.insert(auditLogs).values({
-      actorId: params.actorId,
-      action: 'minisite.created',
-      entityType: 'minisite',
-      entityId: String(minisite.id),
-      metadata: { slug: minisite.slug, status: minisite.status, isDemo: params.isDemo },
-    });
+    await Promise.all(postInserts);
 
     return minisite;
   } catch (error) {
@@ -595,49 +709,262 @@ export async function createMinisiteRecord(params: {
   }
 }
 
+export async function publishMinisiteSnapshot(params: {
+  minisiteId: number;
+  actorId: number;
+}) {
+  const result = await db.transaction(async (tx) => {
+    const rows = await tx
+      .select({
+        minisite: minisites,
+        business: businesses,
+      })
+      .from(minisites)
+      .innerJoin(businesses, eq(minisites.businessId, businesses.id))
+      .where(eq(minisites.id, params.minisiteId))
+      .limit(1);
+
+    if (rows.length === 0) return null;
+
+    const { minisite, business } = rows[0];
+    if (isReservedSlug(minisite.slug)) {
+      throw new SlugValidationError(
+        `O slug "/${minisite.slug}" é uma rota reservada do sistema e não pode ser publicado.`,
+        400
+      );
+    }
+
+    const blocks = await tx
+      .select()
+      .from(minisiteBlocks)
+      .where(eq(minisiteBlocks.minisiteId, minisite.id))
+      .orderBy(minisiteBlocks.position);
+
+    const now = new Date();
+    const snapshot = {
+      id: minisite.id,
+      businessId: minisite.businessId,
+      title: minisite.title,
+      slug: minisite.slug,
+      status: 'publicado' as const,
+      templateId: minisite.templateId,
+      theme: minisite.theme,
+      seo: minisite.seo,
+      business,
+      blocks,
+      publishedAt: now.toISOString(),
+    };
+
+    const [updated] = await tx
+      .update(minisites)
+      .set({
+        status: 'publicado',
+        publishedSnapshot: snapshot,
+        publishedAt: now,
+        publicationAuthorizedAt: now,
+        publicationAuthorizedBy: params.actorId,
+        updatedAt: now,
+      })
+      .where(eq(minisites.id, minisite.id))
+      .returning();
+
+    await tx.insert(auditLogs).values({
+      actorId: params.actorId,
+      action:
+        minisite.status === 'publicado'
+          ? 'minisite.republished'
+          : 'minisite.published_official',
+      entityType: 'minisite',
+      entityId: String(minisite.id),
+      metadata: {
+        previousStatus: minisite.status,
+        slug: minisite.slug,
+        publishedAt: now.toISOString(),
+      },
+    });
+
+    return updated;
+  });
+
+  return result;
+}
+
+export async function unpublishMinisite(params: {
+  minisiteId: number;
+  nextStatus?: 'rascunho' | 'demonstracao' | 'desativado';
+  actorId: number;
+}) {
+  const nextStatus = params.nextStatus ?? 'rascunho';
+  const current = await db
+    .select()
+    .from(minisites)
+    .where(eq(minisites.id, params.minisiteId))
+    .limit(1);
+
+  if (current.length === 0) return null;
+
+  const [updated] = await db
+    .update(minisites)
+    .set({
+      status: nextStatus,
+      publishedSnapshot: null,
+      updatedAt: new Date(),
+    })
+    .where(eq(minisites.id, params.minisiteId))
+    .returning();
+
+  await db.insert(auditLogs).values({
+    actorId: params.actorId,
+    action: 'minisite.unpublished',
+    entityType: 'minisite',
+    entityId: String(params.minisiteId),
+    metadata: {
+      previousStatus: current[0].status,
+      newStatus: nextStatus,
+      slug: current[0].slug,
+    },
+  });
+
+  return updated;
+}
+
+export type PublicMinisiteLookupResult =
+  | {
+      kind: 'found';
+      canonicalSlug: string;
+      minisiteId: number;
+      updatedAt: Date;
+      publishedAt: Date | null;
+      minisite: Record<string, unknown>;
+    }
+  | {
+      kind: 'redirect';
+      targetSlug: string;
+      minisiteId: number;
+    }
+  | {
+      kind: 'not_found';
+    };
+
+export async function listMinisiteSlugAliases(minisiteId: number): Promise<string[]> {
+  const rows = await db
+    .select({ aliasSlug: minisiteSlugAliases.aliasSlug })
+    .from(minisiteSlugAliases)
+    .where(eq(minisiteSlugAliases.minisiteId, minisiteId))
+    .orderBy(desc(minisiteSlugAliases.createdAt));
+  return rows.map((r) => r.aliasSlug);
+}
+
+export async function resolvePublicMinisiteLookup(
+  rawSlug: string,
+  incrementViews = false
+): Promise<PublicMinisiteLookupResult> {
+  const normalized = String(rawSlug || '').trim().toLowerCase();
+  if (!normalized || isReservedSlug(normalized)) {
+    return { kind: 'not_found' };
+  }
+
+  const rows = await db
+    .select()
+    .from(minisites)
+    .where(eq(minisites.slug, normalized))
+    .limit(1);
+
+  if (rows.length > 0) {
+    const row = rows[0];
+    if (row.status !== 'publicado' || !row.publishedSnapshot) {
+      return { kind: 'not_found' };
+    }
+
+    if (incrementViews) {
+      await db
+        .update(minisites)
+        .set({ viewsCount: sql`${minisites.viewsCount} + 1` })
+        .where(eq(minisites.id, row.id));
+      await db.insert(minisiteEvents).values({
+        minisiteId: row.id,
+        eventType: 'page_view',
+        metadata: { slug: row.slug, source: 'public_path' },
+      });
+    }
+
+    const snapshot = row.publishedSnapshot as Record<string, unknown>;
+    return {
+      kind: 'found',
+      canonicalSlug: row.slug,
+      minisiteId: row.id,
+      updatedAt: row.updatedAt,
+      publishedAt: row.publishedAt,
+      minisite: {
+        ...snapshot,
+        slug: row.slug,
+        viewsCount: Number(row.viewsCount ?? 0) + (incrementViews ? 1 : 0),
+        publishedAt: row.publishedAt,
+      },
+    };
+  }
+
+  // Fallback to persistent slug aliases (1-hop redirect; never exposes drafts or loops)
+  const aliasRows = await db
+    .select({
+      aliasSlug: minisiteSlugAliases.aliasSlug,
+      minisiteId: minisites.id,
+      targetSlug: minisites.slug,
+      targetStatus: minisites.status,
+      publishedSnapshot: minisites.publishedSnapshot,
+    })
+    .from(minisiteSlugAliases)
+    .innerJoin(minisites, eq(minisiteSlugAliases.minisiteId, minisites.id))
+    .where(eq(minisiteSlugAliases.aliasSlug, normalized))
+    .limit(1);
+
+  if (aliasRows.length === 0) {
+    return { kind: 'not_found' };
+  }
+
+  const target = aliasRows[0];
+  if (
+    target.targetStatus !== 'publicado' ||
+    !target.publishedSnapshot ||
+    !target.targetSlug ||
+    isReservedSlug(target.targetSlug) ||
+    target.targetSlug === normalized
+  ) {
+    return { kind: 'not_found' };
+  }
+
+  return {
+    kind: 'redirect',
+    targetSlug: target.targetSlug,
+    minisiteId: target.minisiteId,
+  };
+}
+
+export async function getPublishedMinisiteBySlug(rawSlug: string, incrementViews = false) {
+  const result = await resolvePublicMinisiteLookup(rawSlug, incrementViews);
+  return result.kind === 'found' ? result.minisite : null;
+}
+
 export async function updateMinisiteStatus(params: {
   minisiteId: number;
   status: MinisiteStatus;
   actorId: number;
 }) {
   try {
-    const current = await db
-      .select()
-      .from(minisites)
-      .where(eq(minisites.id, params.minisiteId))
-      .limit(1);
-
-    if (current.length === 0) return null;
-
-    const updatePayload: Partial<typeof minisites.$inferInsert> = {
-      status: params.status,
-      updatedAt: new Date(),
-    };
-
     if (params.status === 'publicado') {
-      updatePayload.publicationAuthorizedAt = new Date();
-      updatePayload.publicationAuthorizedBy = params.actorId;
+      return await publishMinisiteSnapshot({
+        minisiteId: params.minisiteId,
+        actorId: params.actorId,
+      });
     }
 
-    const updated = await db
-      .update(minisites)
-      .set(updatePayload)
-      .where(eq(minisites.id, params.minisiteId))
-      .returning();
-
-    await db.insert(auditLogs).values({
+    return await unpublishMinisite({
+      minisiteId: params.minisiteId,
+      nextStatus: params.status as 'rascunho' | 'demonstracao' | 'desativado',
       actorId: params.actorId,
-      action:
-        params.status === 'publicado'
-          ? 'minisite.published_official'
-          : 'minisite.status_changed',
-      entityType: 'minisite',
-      entityId: String(params.minisiteId),
-      metadata: { previousStatus: current[0].status, newStatus: params.status },
     });
-
-    return updated[0];
   } catch (error) {
+    if (error instanceof SlugValidationError) throw error;
     console.error('Erro ao atualizar status do minisite:', error);
     throw new Error('Não foi possível atualizar o status de publicação.', { cause: error });
   }
@@ -673,32 +1000,95 @@ export async function updateMinisiteFull(params: {
     const existing = existingRows[0];
 
     let finalSlug = existing.slug;
-    if (params.slug && params.slug.trim() !== '' && params.slug.trim() !== existing.slug) {
-      const candidate = sanitizeSlug(params.slug);
-      const conflict = await db
-        .select({ id: minisites.id })
-        .from(minisites)
-        .where(and(eq(minisites.slug, candidate), sql`${minisites.id} <> ${params.minisiteId}`))
-        .limit(1);
-      if (conflict.length > 0) {
-        throw new Error(`O endereço "${candidate}" já está em uso por outro minisite.`);
+    const requestedSlugNormalized =
+      typeof params.slug === 'string' ? params.slug.trim().toLowerCase() : '';
+    if (requestedSlugNormalized && requestedSlugNormalized !== existing.slug) {
+      const validation = validateSlug(requestedSlugNormalized);
+      if (!validation.valid) {
+        throw new SlugValidationError(validation.reason || 'Slug inválido.', 400);
+      }
+      const candidate = validation.normalized;
+      const [primaryConflict, aliasConflict] = await Promise.all([
+        db
+          .select({ id: minisites.id })
+          .from(minisites)
+          .where(and(eq(minisites.slug, candidate), ne(minisites.id, params.minisiteId)))
+          .limit(1),
+        db
+          .select({ id: minisiteSlugAliases.id })
+          .from(minisiteSlugAliases)
+          .where(
+            and(
+              eq(minisiteSlugAliases.aliasSlug, candidate),
+              ne(minisiteSlugAliases.minisiteId, params.minisiteId)
+            )
+          )
+          .limit(1),
+      ]);
+      if (primaryConflict.length > 0 || aliasConflict.length > 0) {
+        throw new SlugValidationError(
+          `O endereço "/${candidate}" já está em uso ou reservado no histórico de outro minisite.`,
+          409
+        );
       }
       finalSlug = candidate;
     }
 
+    const slugChanged = finalSlug !== existing.slug;
+
     const updated = await db.transaction(async (tx) => {
-      const [savedMinisite] = await tx
-        .update(minisites)
-        .set({
-          title: params.title,
-          slug: finalSlug,
-          templateId: params.templateId,
-          theme: params.theme,
-          seo: params.seo,
-          updatedAt: new Date(),
-        })
-        .where(eq(minisites.id, params.minisiteId))
-        .returning();
+      // Remove target slug from this minisite's own alias history to avoid redirect loops (e.g. A -> B -> A)
+      if (slugChanged) {
+        await tx
+          .delete(minisiteSlugAliases)
+          .where(
+            and(
+              eq(minisiteSlugAliases.aliasSlug, finalSlug),
+              eq(minisiteSlugAliases.minisiteId, params.minisiteId)
+            )
+          );
+      }
+
+      let savedMinisite: typeof minisites.$inferSelect;
+      try {
+        const [row] = await tx
+          .update(minisites)
+          .set({
+            title: params.title,
+            slug: finalSlug,
+            templateId: params.templateId,
+            theme: params.theme,
+            seo: params.seo,
+            updatedAt: new Date(),
+          })
+          .where(eq(minisites.id, params.minisiteId))
+          .returning();
+        savedMinisite = row;
+      } catch (err) {
+        if (isPgUniqueViolation(err)) {
+          throw new SlugValidationError(
+            `O endereço "/${finalSlug}" já está em uso por outro minisite.`,
+            409
+          );
+        }
+        throw err;
+      }
+
+      // Persist old slug as redirect alias when renaming a published minisite
+      if (
+        slugChanged &&
+        existing.status === 'publicado' &&
+        existing.slug &&
+        !isReservedSlug(existing.slug)
+      ) {
+        await tx
+          .insert(minisiteSlugAliases)
+          .values({
+            minisiteId: params.minisiteId,
+            aliasSlug: existing.slug,
+          })
+          .onConflictDoNothing({ target: minisiteSlugAliases.aliasSlug });
+      }
 
       if (params.businessPatch) {
         const bp = params.businessPatch;
@@ -760,7 +1150,11 @@ export async function updateMinisiteFull(params: {
         action: 'minisite.updated',
         entityType: 'minisite',
         entityId: String(params.minisiteId),
-        metadata: { version: nextVersion, blocksCount: params.blocks.length },
+        metadata: {
+          version: nextVersion,
+          blocksCount: params.blocks.length,
+          ...(slugChanged ? { previousSlug: existing.slug, slug: finalSlug } : {}),
+        },
       });
 
       return savedMinisite;
@@ -768,10 +1162,10 @@ export async function updateMinisiteFull(params: {
 
     return await getMinisiteDetail({ id: updated.id, incrementViews: false });
   } catch (error) {
-    console.error('Erro ao salvar edição completa do minisite:', error);
-    if (error instanceof Error && error.message.includes('já está em uso')) {
+    if (error instanceof SlugValidationError) {
       throw error;
     }
+    console.error('Erro ao salvar edição completa do minisite:', error);
     throw new Error('Não foi possível salvar as alterações do minisite.', { cause: error });
   }
 }
@@ -893,3 +1287,37 @@ export async function listAuditLogs(limitCount = 40) {
     throw new Error('Não foi possível carregar os registros de auditoria.', { cause: error });
   }
 }
+
+export async function saveMediaAsset(params: {
+  filename: string;
+  mimeType: string;
+  dataBase64: string;
+  sizeBytes: number;
+}) {
+  await db
+    .insert(mediaAssets)
+    .values({
+      filename: params.filename,
+      mimeType: params.mimeType,
+      dataBase64: params.dataBase64,
+      sizeBytes: params.sizeBytes,
+    })
+    .onConflictDoUpdate({
+      target: mediaAssets.filename,
+      set: {
+        mimeType: params.mimeType,
+        dataBase64: params.dataBase64,
+        sizeBytes: params.sizeBytes,
+      },
+    });
+}
+
+export async function getMediaAssetByFilename(filename: string) {
+  const rows = await db
+    .select()
+    .from(mediaAssets)
+    .where(eq(mediaAssets.filename, filename))
+    .limit(1);
+  return rows[0] ?? null;
+}
+

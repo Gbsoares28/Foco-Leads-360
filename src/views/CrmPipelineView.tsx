@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { interpolateScriptVariables } from '../lib/default-scripts';
+import { buildPublicMinisiteUrl } from '../lib/slug-utils';
 
 interface CrmLead {
   id: number;
@@ -73,7 +74,7 @@ function formatBRLFromCents(cents: number): string {
 }
 
 export function CrmPipelineView({ onNavigate }: { onNavigate: (path: string) => void }) {
-  const { apiFetch, showDemoData, isDemoSession, profile, signInWithGoogle } = useAuth();
+  const { apiFetch, showDemoData, isDemoSession, profile, logout } = useAuth();
 
   const [leads, setLeads] = useState<CrmLead[]>([]);
   const [stages, setStages] = useState<CrmStageDef[]>([
@@ -89,7 +90,7 @@ export function CrmPipelineView({ onNavigate }: { onNavigate: (path: string) => 
     operatorCity: '',
     sitePriceLabel: 'R$ 97/mês',
     platePriceLabel: 'R$ 79,00',
-    baseDomain: 'focoleads360.com.br',
+    baseDomain: 'linkfoco.com.br',
     whatsappConnected: false,
   });
   const [scripts, setScripts] = useState<CommercialScript[]>([]);
@@ -264,8 +265,10 @@ export function CrmPipelineView({ onNavigate }: { onNavigate: (path: string) => 
     const reviewsVal =
       typeof meta.userRatingCount === 'number' ? meta.userRatingCount : '0';
     const siteLink = outreachLead.minisiteSlug
-      ? `${window.location.origin}/demo/${outreachLead.minisiteSlug}`
-      : `https://${settings.baseDomain}`;
+      ? outreachLead.minisiteStatus === 'publicado'
+        ? buildPublicMinisiteUrl(outreachLead.minisiteSlug)
+        : `${window.location.origin}/demo/${outreachLead.minisiteSlug}`
+      : buildPublicMinisiteUrl('nosso-pet-favorito');
 
     return interpolateScriptVariables(activeScript.body, {
       meu_nome: settings.operatorName,
@@ -390,8 +393,8 @@ export function CrmPipelineView({ onNavigate }: { onNavigate: (path: string) => 
         <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700 flex items-center justify-between gap-2">
           <span>{error}</span>
           {(isDemoSession || !profile) && (
-            <button type="button" onClick={signInWithGoogle} className="underline font-semibold cursor-pointer">
-              Entrar com Google
+            <button type="button" onClick={logout} className="underline font-semibold cursor-pointer">
+              Ir para login
             </button>
           )}
         </div>
@@ -552,7 +555,13 @@ export function CrmPipelineView({ onNavigate }: { onNavigate: (path: string) => 
                       {lead.minisiteSlug ? (
                         <button
                           type="button"
-                          onClick={() => onNavigate(`/demo/${lead.minisiteSlug}`)}
+                          onClick={() =>
+                            onNavigate(
+                              lead.minisiteStatus === 'publicado'
+                                ? `/${lead.minisiteSlug}`
+                                : `/demo/${lead.minisiteSlug}`
+                            )
+                          }
                           className="text-[#1677F2] hover:underline cursor-pointer"
                         >
                           {lead.minisiteViews ?? 0} visualizações

@@ -31,18 +31,22 @@ export interface MinisiteTheme {
   serviceCardBg?: string;
   textColor?: string;
   buttonTextColor?: string;
-  buttonStyle?: 'solid' | 'outline' | 'gradient';
+  buttonStyle?: 'solid' | 'soft' | 'outline' | 'gradient';
   buttonRadius?: 'md' | 'xl' | 'full';
   heroStyle?: 'card' | 'banner' | 'minimal';
+  siteStyle?: 'classico' | 'vitrine' | 'luxo' | 'vibrante';
+  servicesLayout?: 'stacked' | 'carousel';
   fontFamily?: string;
   coverImage?: string;
   coverVideo?: string;
   logoImage?: string;
   fixedWhatsappButton?: boolean;
+  whatsappDefaultMessage?: string;
   showOpenBadge?: boolean;
   openBadgeText?: string;
   brandAnalysisSummary?: string;
   photoAttribution?: { displayName: string; uri?: string } | null;
+  placePhotosUri?: string;
 }
 
 export interface MinisiteSeo {
@@ -64,6 +68,7 @@ export interface GoogleReviewItem {
   authorName: string;
   authorUri?: string;
   authorPhotoUri?: string;
+  reviewUri?: string;
   rating: number;
   relativeTime: string;
   text: string;
@@ -74,6 +79,9 @@ export interface GalleryPhotoItem {
   caption?: string;
   attributionName?: string;
   attributionUri?: string;
+  originUri?: string;
+  googlePlaceId?: string;
+  photoIndex?: number;
 }
 
 export interface PalettePreset {
@@ -179,6 +187,119 @@ export const CURATED_PALETTES: PalettePreset[] = [
       buttonTextColor: '#FFFFFF',
     },
   },
+];
+
+export interface SiteStylePreset {
+  id: 'classico' | 'vitrine' | 'luxo' | 'vibrante';
+  label: string;
+  description: string;
+  patch: Partial<MinisiteTheme>;
+}
+
+export const SITE_STYLE_PRESETS: SiteStylePreset[] = [
+  {
+    id: 'classico',
+    label: 'Clássico',
+    description: 'Simples, estilo link na bio',
+    patch: {
+      siteStyle: 'classico',
+      primaryColor: '#1677F2',
+      secondaryColor: '#FACC15',
+      backgroundColor: '#F8FAFC',
+      surfaceColor: '#FFFFFF',
+      textColor: '#10253D',
+      buttonTextColor: '#FFFFFF',
+      buttonStyle: 'solid',
+      buttonRadius: 'xl',
+      fixedWhatsappButton: false,
+    },
+  },
+  {
+    id: 'vitrine',
+    label: 'Vitrine',
+    description: 'Claro e moderno, com cartões e botão fixo',
+    patch: {
+      siteStyle: 'vitrine',
+      primaryColor: '#C2410C',
+      secondaryColor: '#FACC15',
+      backgroundColor: '#FFF8EE',
+      surfaceColor: '#FFFFFF',
+      textColor: '#2B1D14',
+      buttonTextColor: '#FFFFFF',
+      buttonStyle: 'solid',
+      buttonRadius: 'full',
+      fixedWhatsappButton: true,
+    },
+  },
+  {
+    id: 'luxo',
+    label: 'Luxo',
+    description: 'Escuro, elegante e dourado',
+    patch: {
+      siteStyle: 'luxo',
+      primaryColor: '#D4AF37',
+      secondaryColor: '#F59E0B',
+      backgroundColor: '#111827',
+      surfaceColor: '#1F2937',
+      textColor: '#F9FAFB',
+      buttonTextColor: '#111827',
+      buttonStyle: 'gradient',
+      buttonRadius: 'xl',
+      fixedWhatsappButton: true,
+    },
+  },
+  {
+    id: 'vibrante',
+    label: 'Vibrante',
+    description: 'Cores fortes e cartões com borda',
+    patch: {
+      siteStyle: 'vibrante',
+      primaryColor: '#C2410C',
+      secondaryColor: '#FACC15',
+      accentColor: '#EC4899',
+      backgroundColor: '#FAF5ED',
+      surfaceColor: '#FFFFFF',
+      textColor: '#1E1B18',
+      buttonTextColor: '#FFFFFF',
+      buttonStyle: 'solid',
+      buttonRadius: 'full',
+      fixedWhatsappButton: true,
+    },
+  },
+];
+
+export interface SegmentThemePreset {
+  id: string;
+  label: string;
+  primaryColor: string;
+  secondaryColor: string;
+  backgroundColor: string;
+  surfaceColor: string;
+  textColor: string;
+  buttonTextColor: string;
+}
+
+export const SEGMENT_THEMES: SegmentThemePreset[] = [
+  { id: 'barbearia', label: 'Barbearia', primaryColor: '#92400E', secondaryColor: '#F59E0B', backgroundColor: '#18181B', surfaceColor: '#27272A', textColor: '#FAFAFA', buttonTextColor: '#FFFFFF' },
+  { id: 'salao_de_beleza', label: 'Salão de beleza', primaryColor: '#BE185D', secondaryColor: '#FDE047', backgroundColor: '#FDF2F8', surfaceColor: '#FFFFFF', textColor: '#1F2937', buttonTextColor: '#FFFFFF' },
+  { id: 'restaurante', label: 'Restaurante', primaryColor: '#9F1239', secondaryColor: '#FBBF24', backgroundColor: '#FFFBF5', surfaceColor: '#FFFFFF', textColor: '#1C1917', buttonTextColor: '#FFFFFF' },
+  { id: 'cafeteria', label: 'Cafeteria', primaryColor: '#78350F', secondaryColor: '#FDE68A', backgroundColor: '#FAF5EE', surfaceColor: '#FFFFFF', textColor: '#291D16', buttonTextColor: '#FFFFFF' },
+  { id: 'clinica_saude', label: 'Clínica e saúde', primaryColor: '#0F766E', secondaryColor: '#A7F3D0', backgroundColor: '#F0FDF9', surfaceColor: '#FFFFFF', textColor: '#0F172A', buttonTextColor: '#FFFFFF' },
+  { id: 'odontologia', label: 'Odontologia', primaryColor: '#0284C7', secondaryColor: '#BAE6FD', backgroundColor: '#F0F9FF', surfaceColor: '#FFFFFF', textColor: '#0C4A6E', buttonTextColor: '#FFFFFF' },
+  { id: 'academia', label: 'Academia e esporte', primaryColor: '#DC2626', secondaryColor: '#FACC15', backgroundColor: '#18181B', surfaceColor: '#27272A', textColor: '#F8FAFC', buttonTextColor: '#FFFFFF' },
+  { id: 'pet_shop', label: 'Pet shop', primaryColor: '#C2410C', secondaryColor: '#FACC15', backgroundColor: '#FFF8EE', surfaceColor: '#FFFFFF', textColor: '#2B1D14', buttonTextColor: '#FFFFFF' },
+  { id: 'loja_moda', label: 'Loja e moda', primaryColor: '#7C3AED', secondaryColor: '#FDE047', backgroundColor: '#FAF5FF', surfaceColor: '#FFFFFF', textColor: '#1E1B4B', buttonTextColor: '#FFFFFF' },
+  { id: 'imobiliaria', label: 'Imobiliária', primaryColor: '#1E3A8A', secondaryColor: '#F59E0B', backgroundColor: '#F8FAFC', surfaceColor: '#FFFFFF', textColor: '#0F172A', buttonTextColor: '#FFFFFF' },
+  { id: 'prestador_de_servicos', label: 'Prestador de serviço', primaryColor: '#1677F2', secondaryColor: '#FACC15', backgroundColor: '#F8FAFC', surfaceColor: '#FFFFFF', textColor: '#10253D', buttonTextColor: '#FFFFFF' },
+  { id: 'cursos_educacao', label: 'Cursos e educação', primaryColor: '#4338CA', secondaryColor: '#FDE047', backgroundColor: '#EEF2FF', surfaceColor: '#FFFFFF', textColor: '#1E1B4B', buttonTextColor: '#FFFFFF' },
+  { id: 'eventos_festas', label: 'Eventos e festas', primaryColor: '#DB2777', secondaryColor: '#FACC15', backgroundColor: '#FFF1F2', surfaceColor: '#FFFFFF', textColor: '#3B0764', buttonTextColor: '#FFFFFF' },
+];
+
+export const FONT_STYLE_OPTIONS = [
+  { id: 'Plus Jakarta Sans', label: 'Moderna', cssValue: "'Plus Jakarta Sans', system-ui, sans-serif" },
+  { id: 'Georgia', label: 'Elegante', cssValue: "Georgia, 'Times New Roman', serif" },
+  { id: 'Nunito', label: 'Arredondada', cssValue: "'Nunito', 'Plus Jakarta Sans', system-ui, sans-serif" },
+  { id: 'Space Grotesk', label: 'Técnica', cssValue: "'Space Grotesk', 'JetBrains Mono', monospace" },
 ];
 
 export const TEMPLATE_OPTIONS = [

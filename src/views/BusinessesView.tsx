@@ -15,12 +15,13 @@ interface Business {
   website: string;
   instagram: string;
   googleMapsUrl: string | null;
+  googlePlaceId?: string | null;
   isDemo: boolean;
   createdAt: string;
 }
 
 export function BusinessesView({ onNavigate }: { onNavigate: (path: string) => void }) {
-  const { apiFetch, showDemoData, isDemoSession, profile, signInWithGoogle } = useAuth();
+  const { apiFetch, showDemoData, isDemoSession, profile } = useAuth();
   const effectiveDemo = isDemoSession || showDemoData;
 
   const [items, setItems] = useState<Business[]>([]);
@@ -126,6 +127,7 @@ export function BusinessesView({ onNavigate }: { onNavigate: (path: string) => v
         method: 'POST',
         body: JSON.stringify({
           businessId: biz.id,
+          googlePlaceId: biz.googlePlaceId || '',
           confirmedName: biz.name,
           confirmedCategory: biz.category,
           confirmedCity: biz.city,
@@ -176,15 +178,6 @@ export function BusinessesView({ onNavigate }: { onNavigate: (path: string) => v
             <h2 className="text-base font-semibold text-[#10253D]">
               Novo cadastro manual de empresa
             </h2>
-            {isDemoSession && (
-              <button
-                type="button"
-                onClick={signInWithGoogle}
-                className="text-xs font-semibold text-[#1677F2] hover:underline cursor-pointer"
-              >
-                Entrar com Google
-              </button>
-            )}
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">

@@ -1,6 +1,16 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
-import { onAuthStateChanged, signInWithPopup, signOut, type User } from 'firebase/auth';
-import { auth, googleAuthProvider } from '../lib/firebase';
+import {
+  createUserWithEmailAndPassword,
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  signOut,
+  type User,
+} from 'firebase/auth';
+import { auth } from '../lib/firebase';
+import {
+  isAuthorizedFirebaseAccount,
+  validateAdminLoginAttempt,
+} from '../lib/auth-policy';
 
 export type UserRole =
   | 'administrador'
@@ -22,31 +32,122 @@ interface AuthContextValue {
   firebaseUser: User | null;
   profile: Profile | null;
   loading: boolean;
+  signingIn: boolean;
   authError: string | null;
   isDemoSession: boolean;
   showDemoData: boolean;
   baseDomain: string;
   setShowDemoData: (value: boolean) => void;
-  signInWithGoogle: () => Promise<void>;
-  enterDemoSession: () => void;
+  signInWithCredentials: (email: string, password: string) => Promise<boolean>;
   logout: () => Promise<void>;
   apiFetch: <T = unknown>(url: string, options?: RequestInit) => Promise<T>;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
+const ADMIN_SESSION_STORAGE_KEY = 'foco_admin_session_token';
+
+function readStoredAdminSessionToken(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.localStorage.getItem(ADMIN_SESSION_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function saveStoredAdminSessionToken(token: string) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(ADMIN_SESSION_STORAGE_KEY, token);
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function clearStoredAdminSessionToken() {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.removeItem(ADMIN_SESSION_STORAGE_KEY);
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function isAdminSessionTokenExpired(token: string, skewSeconds = 30): boolean {
+  if (!token || !token.startsWith('admin-session.')) return true;
+  const body = token.slice('admin-session.'.length);
+  const parts = body.split('.');
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return true;
+  try {
+    const base64 = parts[0].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
+    const decoded = JSON.parse(atob(padded)) as { exp?: unknown };
+    if (typeof decoded.exp !== 'number') return true;
+    const now = Math.floor(Date.now() / 1000);
+    return decoded.exp <= now + skewSeconds;
+  } catch {
+    return true;
+  }
+}
+
+function getFirebaseAuthErrorCode(err: unknown): string {
+  if (err && typeof err === 'object' && 'code' in err) {
+    return String((err as { code?: unknown }).code || '');
+  }
+  return '';
+}
+
+function isProviderDisabledFirebaseError(err: unknown): boolean {
+  const code = getFirebaseAuthErrorCode(err);
+  return (
+    code === 'auth/operation-not-allowed' ||
+    code === 'auth/admin-restricted-operation'
+  );
+}
+
+function mapFirebaseAuthError(err: unknown): string {
+  const code = getFirebaseAuthErrorCode(err);
+  switch (code) {
+    case 'auth/invalid-credential':
+    case 'auth/wrong-password':
+    case 'auth/user-not-found':
+      return 'Credenciais inválidas no Firebase Auth. Verifique se a conta autorizada possui a senha configurada corretamente.';
+    case 'auth/email-already-in-use':
+      return 'Este e-mail já existe no Firebase Auth com outro método ou senha. Redefina a senha no Console do Firebase (Authentication > Users) para concluir o acesso.';
+    case 'auth/too-many-requests':
+      return 'Muitas tentativas seguidas. Aguarde alguns instantes antes de tentar novamente.';
+    case 'auth/network-request-failed':
+      return 'Falha de conexão com a autenticação. Verifique sua internet e tente novamente.';
+    default:
+      return err instanceof Error ? err.message : 'Falha na autenticação.';
+  }
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [idToken, setIdToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [signingIn, setSigningIn] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
-  const [isDemoSession, setIsDemoSession] = useState(false);
-  const [showDemoData, setShowDemoData] = useState(true);
-  const [baseDomain, setBaseDomain] = useState('focoleads360.com.br');
+  const [showDemoData, setShowDemoData] = useState(false);
+  const [baseDomain, setBaseDomain] = useState('linkfoco.vercel.app');
 
   const syncProfile = useCallback(async (user: User) => {
+    const providerIds = user.providerData.map((p) => p.providerId).filter(Boolean);
+    const policyCheck = isAuthorizedFirebaseAccount({
+      email: user.email,
+      providerIds,
+    });
+
+    if (!policyCheck.allowed) {
+      await signOut(auth).catch(() => undefined);
+      throw new Error(policyCheck.error || 'Acesso bloqueado.');
+    }
+
     const token = await user.getIdToken();
+    clearStoredAdminSessionToken();
     setIdToken(token);
     const res = await fetch('/api/me', {
       headers: {
@@ -55,57 +156,204 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
     const data = await res.json();
     if (!res.ok) {
+      await signOut(auth).catch(() => undefined);
       throw new Error(data.error || 'Não foi possível validar sua conta.');
     }
     setProfile(data.profile);
     if (data.baseDomain) setBaseDomain(data.baseDomain);
-    setIsDemoSession(false);
     setShowDemoData(false);
   }, []);
 
+  const restoreServerAdminSession = useCallback(async (): Promise<boolean> => {
+    const storedToken = readStoredAdminSessionToken();
+    if (!storedToken || isAdminSessionTokenExpired(storedToken)) {
+      if (storedToken) {
+        clearStoredAdminSessionToken();
+      }
+      return false;
+    }
+
+    try {
+      const res = await fetch('/api/me', {
+        headers: {
+          Authorization: `Bearer ${storedToken}`,
+        },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.profile) {
+        clearStoredAdminSessionToken();
+        return false;
+      }
+      const nextToken =
+        typeof data.refreshedToken === 'string' && data.refreshedToken.startsWith('admin-session.')
+          ? data.refreshedToken
+          : storedToken;
+      saveStoredAdminSessionToken(nextToken);
+      setIdToken(nextToken);
+      setProfile(data.profile);
+      if (data.baseDomain) setBaseDomain(data.baseDomain);
+      setShowDemoData(false);
+      setAuthError(null);
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const authenticateViaServerSession = useCallback(
+    async (normalizedEmail: string, password: string): Promise<boolean> => {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          email: normalizedEmail,
+          password,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.token || !data?.profile) {
+        throw new Error(data.error || 'Acesso bloqueado: credenciais não autorizadas.');
+      }
+      saveStoredAdminSessionToken(data.token);
+      setIdToken(data.token);
+      setProfile(data.profile);
+      if (data.baseDomain) setBaseDomain(data.baseDomain);
+      setShowDemoData(false);
+      setAuthError(null);
+      return true;
+    },
+    []
+  );
+
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      setFirebaseUser(user);
       if (user) {
+        const providerIds = user.providerData.map((p) => p.providerId).filter(Boolean);
+        const policyCheck = isAuthorizedFirebaseAccount({
+          email: user.email,
+          providerIds,
+        });
+
+        if (!policyCheck.allowed) {
+          await signOut(auth).catch(() => undefined);
+          clearStoredAdminSessionToken();
+          setFirebaseUser(null);
+          setProfile(null);
+          setIdToken(null);
+          setAuthError(
+            policyCheck.error || 'Acesso bloqueado: conta não autorizada.'
+          );
+          setLoading(false);
+          return;
+        }
+
+        setFirebaseUser(user);
         try {
           setAuthError(null);
           await syncProfile(user);
         } catch (err) {
           setAuthError(err instanceof Error ? err.message : 'Falha na autenticação.');
+          setFirebaseUser(null);
           setProfile(null);
+          setIdToken(null);
         }
       } else {
-        setProfile(null);
-        setIdToken(null);
+        setFirebaseUser(null);
+        const restored = await restoreServerAdminSession();
+        if (!restored) {
+          setProfile(null);
+          setIdToken(null);
+        }
       }
       setLoading(false);
     });
     return () => unsubscribe();
-  }, [syncProfile]);
+  }, [restoreServerAdminSession, syncProfile]);
 
-  const signInWithGoogle = useCallback(async () => {
-    try {
+  const signInWithCredentials = useCallback(
+    async (email: string, password: string): Promise<boolean> => {
+      const validation = validateAdminLoginAttempt(email, password);
+      if (!validation.ok) {
+        setAuthError(validation.error);
+        return false;
+      }
+
+      setSigningIn(true);
       setAuthError(null);
-      const result = await signInWithPopup(auth, googleAuthProvider);
-      await syncProfile(result.user);
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : 'Erro ao entrar com Google.';
-      setAuthError(message);
-    }
-  }, [syncProfile]);
+      try {
+        const cred = await signInWithEmailAndPassword(
+          auth,
+          validation.normalizedEmail,
+          password
+        );
+        await syncProfile(cred.user);
+        return true;
+      } catch (err) {
+        if (isProviderDisabledFirebaseError(err)) {
+          try {
+            return await authenticateViaServerSession(
+              validation.normalizedEmail,
+              password
+            );
+          } catch (serverErr) {
+            setAuthError(
+              serverErr instanceof Error
+                ? serverErr.message
+                : 'Falha na autenticação.'
+            );
+            return false;
+          }
+        }
 
-  const enterDemoSession = useCallback(() => {
-    setAuthError(null);
-    setIsDemoSession(true);
-    setShowDemoData(true);
-  }, []);
+        const code = getFirebaseAuthErrorCode(err);
+        if (code === 'auth/user-not-found' || code === 'auth/invalid-credential') {
+          try {
+            const created = await createUserWithEmailAndPassword(
+              auth,
+              validation.normalizedEmail,
+              password
+            );
+            await syncProfile(created.user);
+            return true;
+          } catch (createErr) {
+            if (isProviderDisabledFirebaseError(createErr)) {
+              try {
+                return await authenticateViaServerSession(
+                  validation.normalizedEmail,
+                  password
+                );
+              } catch (serverErr) {
+                setAuthError(
+                  serverErr instanceof Error
+                    ? serverErr.message
+                    : 'Falha na autenticação.'
+                );
+                return false;
+              }
+            }
+            setAuthError(mapFirebaseAuthError(createErr));
+            return false;
+          }
+        }
+        setAuthError(mapFirebaseAuthError(err));
+        return false;
+      } finally {
+        setSigningIn(false);
+      }
+    },
+    [authenticateViaServerSession, syncProfile]
+  );
 
   const logout = useCallback(async () => {
-    await signOut(auth);
+    clearStoredAdminSessionToken();
+    await signOut(auth).catch(() => undefined);
+    setFirebaseUser(null);
     setProfile(null);
     setIdToken(null);
-    setIsDemoSession(false);
+    setShowDemoData(false);
+    setAuthError(null);
   }, []);
 
   const apiFetch = useCallback(
@@ -115,27 +363,73 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         headers.set('Content-Type', 'application/json');
       }
 
+      let activeToken = idToken;
       if (firebaseUser) {
-        const freshToken = idToken || (await firebaseUser.getIdToken());
-        headers.set('Authorization', `Bearer ${freshToken}`);
-      } else if (isDemoSession) {
-        headers.set('x-foco-demo-mode', 'true');
+        activeToken = await firebaseUser.getIdToken();
+      } else {
+        if (!activeToken) {
+          activeToken = readStoredAdminSessionToken();
+        }
+        if (activeToken && activeToken.startsWith('admin-session.') && isAdminSessionTokenExpired(activeToken)) {
+          clearStoredAdminSessionToken();
+          setIdToken(null);
+          setProfile(null);
+          setAuthError('Sua sessão expirou. Faça login novamente.');
+          throw new Error('Sessão expirada. Faça login novamente.');
+        }
+      }
+      if (activeToken) {
+        headers.set('Authorization', `Bearer ${activeToken}`);
       }
 
       const response = await fetch(url, {
         ...options,
         headers,
       });
-      const json = await response.json().catch(() => ({}));
-      if (response.status === 429 || json.code === 'GMP_QUOTA_EXCEEDED' || json.error?.status === 'RESOURCE_EXHAUSTED') {
+      const rawText = await response.text().catch(() => '');
+      let json: Record<string, unknown> = {};
+      let parseFailed = false;
+      if (rawText) {
+        try {
+          const parsed = JSON.parse(rawText);
+          if (parsed && typeof parsed === 'object') {
+            json = parsed as Record<string, unknown>;
+          } else {
+            parseFailed = true;
+          }
+        } catch {
+          parseFailed = true;
+        }
+      }
+      const errObj = json.error as { status?: string } | string | undefined;
+      if (
+        response.status === 429 ||
+        json.code === 'GMP_QUOTA_EXCEEDED' ||
+        (typeof errObj === 'object' && errObj?.status === 'RESOURCE_EXHAUSTED')
+      ) {
         window.dispatchEvent(new CustomEvent('gmp-quota-exceeded'));
       }
+      if (response.status === 401) {
+        clearStoredAdminSessionToken();
+        if (!firebaseUser) {
+          setIdToken(null);
+          setProfile(null);
+          setAuthError('Sessão inválida ou expirada. Faça login novamente.');
+        }
+      }
       if (!response.ok) {
-        throw new Error(json.error || `Erro na requisição (${response.status}).`);
+        const msg =
+          typeof json.error === 'string'
+            ? json.error
+            : `Erro na requisição (${response.status}).`;
+        throw new Error(msg);
+      }
+      if (parseFailed || !rawText.trim()) {
+        throw new Error('Resposta inválida do servidor ao processar a solicitação.');
       }
       return json as T;
     },
-    [firebaseUser, idToken, isDemoSession]
+    [firebaseUser, idToken]
   );
 
   return (
@@ -144,13 +438,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         firebaseUser,
         profile,
         loading,
+        signingIn,
         authError,
-        isDemoSession,
+        isDemoSession: false,
         showDemoData,
         baseDomain,
         setShowDemoData,
-        signInWithGoogle,
-        enterDemoSession,
+        signInWithCredentials,
         logout,
         apiFetch,
       }}

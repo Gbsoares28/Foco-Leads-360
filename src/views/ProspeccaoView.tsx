@@ -31,6 +31,7 @@ interface ProspectResult {
   directionsUri?: string;
   reviewsUri?: string;
   writeReviewUri?: string;
+  photosUri?: string;
   rating: number | null;
   userRatingCount: number | null;
   openNow?: boolean | null;
@@ -69,7 +70,7 @@ interface SearchHistoryItem {
 }
 
 export function ProspeccaoView({ onNavigate }: { onNavigate: (path: string) => void }) {
-  const { apiFetch, showDemoData, isDemoSession, profile, signInWithGoogle } = useAuth();
+  const { apiFetch, showDemoData, isDemoSession, profile, logout } = useAuth();
 
   const [country, setCountry] = useState('BR');
   const [stateUf, setStateUf] = useState('');
@@ -230,6 +231,8 @@ export function ProspeccaoView({ onNavigate }: { onNavigate: (path: string) => v
             directionsUri: item.directionsUri,
             reviewsUri: item.reviewsUri,
             writeReviewUri: item.writeReviewUri,
+            photosUri: item.photosUri,
+            googleMapsUri: item.googleMapsUrl,
             location: item.location,
             reviews: item.reviews,
             photos: item.photos,
@@ -391,10 +394,10 @@ export function ProspeccaoView({ onNavigate }: { onNavigate: (path: string) => v
           {(isDemoSession || !profile) && (
             <button
               type="button"
-              onClick={signInWithGoogle}
+              onClick={logout}
               className="underline font-semibold text-[#10253D] cursor-pointer"
             >
-              Entrar com Google
+              Ir para login
             </button>
           )}
         </div>

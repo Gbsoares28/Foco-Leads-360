@@ -7,6 +7,7 @@ import {
   ChevronDown,
   ChevronUp,
   Copy,
+  Download,
   ExternalLink,
   Eye,
   EyeOff,
@@ -15,6 +16,8 @@ import {
   Layers,
   Palette,
   Plus,
+  QrCode,
+  RefreshCw,
   RotateCcw,
   Save,
   ShieldAlert,
@@ -24,9 +27,12 @@ import {
   Upload,
   X,
 } from 'lucide-react';
+import QRCode from 'qrcode';
 import { useAuth } from '../contexts/AuthContext';
 import { StatusIndicator } from '../components/StatusIndicator';
 import { MinisiteRenderer, type RenderableMinisite } from '../components/MinisiteRenderer';
+import { ResilientImage } from '../components/ResilientImage';
+import { clearImageCacheForPlace, preloadImageBatch } from '../lib/image-cache';
 import {
   FacebookLogo,
   InstagramLogo,
@@ -37,8 +43,12 @@ import {
 import {
   BLOCK_CATALOG,
   CURATED_PALETTES,
+  enforceThemePaletteContrast,
+  FONT_STYLE_OPTIONS,
   getBlockLabel,
   getBlockSummary,
+  SEGMENT_THEMES,
+  SITE_STYLE_PRESETS,
   TEMPLATE_OPTIONS,
   type GalleryPhotoItem,
   type GoogleReviewItem,
@@ -47,14 +57,25 @@ import {
   type MinisiteSeo,
   type MinisiteTheme,
 } from '../lib/minisite-types';
+import {
+  buildChannelPublicMinisiteUrl,
+  buildLocalMinisitePreviewPath,
+  buildPublicMinisitePath,
+  buildPublicMinisiteUrl,
+  getConfiguredPublicBaseUrl,
+  validateSlug,
+} from '../lib/slug-utils';
 
 interface EditorMinisiteDetail {
   id: number;
   title: string;
   slug: string;
+  slugAliases?: string[];
   status: string;
   templateId: string;
   isDemo: boolean;
+  hasUnpublishedChanges?: boolean;
+  publishedAt?: string | null;
   theme: MinisiteTheme;
   seo: MinisiteSeo;
   business: {
@@ -66,6 +87,7 @@ interface EditorMinisiteDetail {
     website: string;
     instagram: string;
     googleMapsUrl: string | null;
+    googlePlaceId?: string | null;
   };
   blocks: Array<MinisiteBlockData & { id: number }>;
 }
@@ -112,8 +134,9 @@ export function MinisiteEditorPreview({
   minisiteId: number;
   onNavigate: (path: string) => void;
 }) {
-  const { apiFetch, baseDomain, profile, isDemoSession } = useAuth();
+  const { apiFetch, profile, isDemoSession } = useAuth();
   const [minisite, setMinisite] = useState<EditorMinisiteDetail | null>(null);
+  const [publicBaseUrl, setPublicBaseUrl] = useState(() => getConfiguredPublicBaseUrl());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -146,6 +169,8 @@ export function MinisiteEditorPreview({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [uploadingTarget, setUploadingTarget] = useState<string | null>(null);
   const [copiedUrl, setCopiedUrl] = useState(false);
+  const [copiedChannelKey, setCopiedChannelKey] = useState<string | null>(null);
+  const [qrCodeDataUrl, setQrCodeDataUrl] = useState<string>('');
   const [showVersions, setShowVersions] = useState(false);
   const [versions, setVersions] = useState<VersionRecord[]>([]);
   const [loadingVersions, setLoadingVersions] = useState(false);
@@ -156,14 +181,24 @@ export function MinisiteEditorPreview({
   } | null>(null);
   const [confirmDeleteMinisite, setConfirmDeleteMinisite] = useState(false);
   const [deletingMinisite, setDeletingMinisite] = useState(false);
+  const [publishingAction, setPublishingAction] = useState(false);
+  const [refreshingGoogle, setRefreshingGoogle] = useState(false);
+  const [googlePhotos, setGooglePhotos] = useState<GalleryPhotoItem[]>([]);
+  const [googleRefreshFeedback, setGoogleRefreshFeedback] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
 
   const hydratedRef = useRef(false);
   const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const hydrateFromDetail = useCallback((detail: EditorMinisiteDetail) => {
+    if (!detail || !detail.id) {
+      throw new Error('Dados do minisite inválidos ou ausentes.');
+    }
     setMinisite(detail);
-    setTitle(detail.title);
-    setSlug(detail.slug);
+    setTitle(detail.title || '');
+    setSlug(detail.slug || '');
     setTemplateId(detail.templateId || 'modelo_generico');
     setTheme(detail.theme || {});
     setSeo(detail.seo || {});
@@ -189,6 +224,18 @@ export function MinisiteEditorPreview({
         clientKey: `blk-${b.id || idx}-${Math.random().toString(36).slice(2, 7)}`,
       }));
     setBlocks(editableBlocks);
+
+    // Populate Google gallery photos initially from existing Google gallery items if any
+    const galBlock = detail.blocks.find((b) => b.blockType === 'galeria');
+    if (Array.isArray(galBlock?.content?.images)) {
+      const existingGoogleImgs = (galBlock.content.images as GalleryPhotoItem[]).filter(
+        (img) => img.url?.includes('/api/google/place-photo')
+      );
+      if (existingGoogleImgs.length > 0) {
+        setGooglePhotos(existingGoogleImgs);
+      }
+    }
+
     setSaveStatus('idle');
     setSaveError(null);
     hydratedRef.current = true;
@@ -198,9 +245,34 @@ export function MinisiteEditorPreview({
     let active = true;
     hydratedRef.current = false;
     setLoading(true);
-    apiFetch<{ minisite: EditorMinisiteDetail }>(`/api/minisites/${minisiteId}`)
+    apiFetch<{ minisite: EditorMinisiteDetail; publicUrl?: string }>(`/api/minisites/${minisiteId}`)
       .then((res) => {
-        if (active) hydrateFromDetail(res.minisite);
+        if (active) {
+          if (!res?.minisite?.slug) {
+            throw new Error('O servidor não retornou os dados completos do minisite.');
+          }
+          hydrateFromDetail(res.minisite);
+          if (res.publicUrl) {
+            try {
+              setPublicBaseUrl(new URL(res.publicUrl).origin);
+            } catch {
+              // keep window.location.origin
+            }
+          }
+          if (res.minisite.business?.googlePlaceId) {
+            apiFetch<{ galleryPhotos: GalleryPhotoItem[] }>(
+              `/api/google/place-details/${encodeURIComponent(res.minisite.business.googlePlaceId)}`
+            )
+              .then((det) => {
+                if (active && Array.isArray(det.galleryPhotos) && det.galleryPhotos.length > 0) {
+                  setGooglePhotos(det.galleryPhotos);
+                }
+              })
+              .catch(() => {
+                // ignore background photo preload failures if API key not configured
+              });
+          }
+        }
       })
       .catch((err) => {
         if (active) setError(err instanceof Error ? err.message : 'Erro ao abrir editor.');
@@ -235,8 +307,8 @@ export function MinisiteEditorPreview({
     ];
   }, [blocks, minisite?.blocks, shortDesc, theme.coverImage, title]);
 
-  const persistSave = useCallback(async () => {
-    if (!minisite || isDemoSession || !profile) return;
+  const persistSave = useCallback(async (): Promise<boolean> => {
+    if (!minisite || isDemoSession || !profile) return false;
     setSaveStatus('saving');
     setSaveError(null);
     try {
@@ -255,12 +327,17 @@ export function MinisiteEditorPreview({
           businessPatch: businessProfile,
         }),
       });
+      if (!res?.minisite) {
+        throw new Error('O servidor não confirmou os dados salvos do minisite.');
+      }
       setMinisite(res.minisite);
-      setSlug(res.minisite.slug);
+      setSlug(res.minisite.slug || minisite.slug || '');
       setSaveStatus('saved');
+      return true;
     } catch (err) {
       setSaveStatus('error');
       setSaveError(err instanceof Error ? err.message : 'Erro ao salvar alterações.');
+      return false;
     }
   }, [
     apiFetch,
@@ -292,6 +369,35 @@ export function MinisiteEditorPreview({
       if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    const activeSlug = slug || minisite?.slug || '';
+    if (!activeSlug) {
+      setQrCodeDataUrl('');
+      return;
+    }
+    const targetUrl = buildPublicMinisiteUrl(activeSlug, {
+      publicBaseUrl,
+    });
+    let cancelled = false;
+    QRCode.toDataURL(targetUrl, {
+      width: 360,
+      margin: 2,
+      color: {
+        dark: '#10253D',
+        light: '#FFFFFF',
+      },
+    })
+      .then((url) => {
+        if (!cancelled) setQrCodeDataUrl(url);
+      })
+      .catch(() => {
+        if (!cancelled) setQrCodeDataUrl('');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [minisite?.slug, publicBaseUrl, slug]);
 
   const handleUploadFile = async (
     file: File,
@@ -414,17 +520,194 @@ export function MinisiteEditorPreview({
   const handleStatusChange = async (nextStatus: string) => {
     if (!minisite || isDemoSession || !profile) return;
     setSaveError(null);
+    setPublishingAction(true);
     try {
-      const res = await apiFetch<{ minisite: { status: string } }>(
-        `/api/minisites/${minisite.id}/status`,
-        {
-          method: 'PATCH',
-          body: JSON.stringify({ status: nextStatus }),
-        }
-      );
-      setMinisite((prev) => (prev ? { ...prev, status: res.minisite.status } : prev));
+      if (nextStatus === 'publicado') {
+        const savedOk = await persistSave();
+        if (!savedOk) return;
+        const res = await apiFetch<{ minisite: { status: string; publishedAt?: string } }>(
+          `/api/minisites/${minisite.id}/publish`,
+          { method: 'POST' }
+        );
+        setMinisite((prev) =>
+          prev
+            ? {
+                ...prev,
+                status: res.minisite.status,
+                hasUnpublishedChanges: false,
+                publishedAt: res.minisite.publishedAt || new Date().toISOString(),
+              }
+            : prev
+        );
+      } else {
+        const res = await apiFetch<{ minisite: { status: string } }>(
+          `/api/minisites/${minisite.id}/status`,
+          {
+            method: 'PATCH',
+            body: JSON.stringify({ status: nextStatus }),
+          }
+        );
+        setMinisite((prev) =>
+          prev
+            ? { ...prev, status: res.minisite.status, hasUnpublishedChanges: false }
+            : prev
+        );
+      }
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : 'Erro ao atualizar status.');
+    } finally {
+      setPublishingAction(false);
+    }
+  };
+
+  const handlePublishSnapshot = async () => {
+    if (!minisite || isDemoSession || !profile) return;
+    setSaveError(null);
+    setPublishingAction(true);
+    try {
+      const savedOk = await persistSave();
+      if (!savedOk) return;
+      const res = await apiFetch<{ minisite: { status: string; publishedAt?: string } }>(
+        `/api/minisites/${minisite.id}/publish`,
+        { method: 'POST' }
+      );
+      setMinisite((prev) =>
+        prev
+          ? {
+              ...prev,
+              status: res.minisite.status,
+              hasUnpublishedChanges: false,
+              publishedAt: res.minisite.publishedAt || new Date().toISOString(),
+            }
+          : prev
+      );
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : 'Erro ao publicar minisite.');
+    } finally {
+      setPublishingAction(false);
+    }
+  };
+
+  const handleUnpublish = async () => {
+    if (!minisite || isDemoSession || !profile) return;
+    setSaveError(null);
+    setPublishingAction(true);
+    try {
+      const res = await apiFetch<{ minisite: { status: string } }>(
+        `/api/minisites/${minisite.id}/unpublish`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ status: 'rascunho' }),
+        }
+      );
+      setMinisite((prev) =>
+        prev ? { ...prev, status: res.minisite.status, hasUnpublishedChanges: false } : prev
+      );
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : 'Erro ao despublicar minisite.');
+    } finally {
+      setPublishingAction(false);
+    }
+  };
+
+  const handleRefreshGoogleData = async () => {
+    if (!minisite || isDemoSession || !profile) {
+      setGoogleRefreshFeedback({
+        type: 'error',
+        message: 'Entre com sua conta Google corporativa para sincronizar os dados do Google Places.',
+      });
+      return;
+    }
+    setRefreshingGoogle(true);
+    setGoogleRefreshFeedback(null);
+    setSaveError(null);
+    try {
+      if (saveStatus === 'dirty') {
+        await persistSave();
+      }
+      const res = await apiFetch<{
+        minisite: EditorMinisiteDetail;
+        googlePhotos: GalleryPhotoItem[];
+        summary: {
+          rating: number | null;
+          userRatingCount: number | null;
+          reviewsImported: number;
+          photosImported: number;
+          weekdayHoursImported: number;
+          preservedManualMedia: boolean;
+          coverAutoFilled: boolean;
+        };
+      }>(`/api/minisites/${minisite.id}/refresh-google`, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      if (!res?.minisite) {
+        throw new Error('O servidor não retornou os dados atualizados do minisite.');
+      }
+      hydrateFromDetail(res.minisite);
+      if (minisite?.business?.googlePlaceId) {
+        clearImageCacheForPlace(minisite.business.googlePlaceId);
+      }
+      if (Array.isArray(res.googlePhotos)) {
+        setGooglePhotos(res.googlePhotos);
+        void preloadImageBatch(
+          res.googlePhotos.map((p) => p.url),
+          3
+        );
+      }
+      const s = res.summary;
+      setGoogleRefreshFeedback({
+        type: 'success',
+        message: `Dados do Google atualizados: ${s.rating != null ? `${s.rating.toFixed(1)}★ (${s.userRatingCount ?? 0}), ` : ''}${s.reviewsImported} avaliações, ${s.photosImported} fotos${s.preservedManualMedia ? ' · mídias manuais preservadas' : ''}.`,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Erro ao atualizar dados do Google.';
+      setGoogleRefreshFeedback({ type: 'error', message: msg });
+      setSaveError(msg);
+    } finally {
+      setRefreshingGoogle(false);
+    }
+  };
+
+  const applyGooglePhotoAsCover = (photo: GalleryPhotoItem) => {
+    const highResUrl = photo.url.replace(/([?&]w=)\d+/, '$11080');
+    setTheme((t) => ({
+      ...t,
+      coverImage: highResUrl,
+      coverVideo: '',
+      photoAttribution: photo.attributionName
+        ? { displayName: photo.attributionName, uri: photo.attributionUri }
+        : null,
+      placePhotosUri: photo.originUri || t.placePhotosUri || minisite?.business?.googleMapsUrl || '',
+    }));
+    markDirty();
+  };
+
+  const applyGooglePhotoAsLogo = (photo: GalleryPhotoItem) => {
+    const logoResUrl = photo.url.replace(/([?&]w=)\d+/, '$1480');
+    setTheme((t) => ({ ...t, logoImage: logoResUrl }));
+    markDirty();
+  };
+
+  const addGooglePhotoToGallery = (photo: GalleryPhotoItem) => {
+    const galIdx = blocks.findIndex((b) => b.blockType === 'galeria');
+    if (galIdx >= 0) {
+      const prevImgs = (blocks[galIdx].content?.images as GalleryPhotoItem[]) || [];
+      if (prevImgs.some((img) => img.url === photo.url)) return;
+      updateBlockContent(galIdx, { images: [...prevImgs, photo] });
+    } else {
+      const newGal: MinisiteBlockData = {
+        blockType: 'galeria',
+        position: blocks.length,
+        visible: true,
+        clientKey: `gal-${Date.now()}`,
+        content: {
+          title: 'Fotos do estabelecimento',
+          images: [photo],
+        },
+      };
+      setBlocks((prev) => [...prev, newGal]);
+      markDirty();
     }
   };
 
@@ -453,6 +736,9 @@ export function MinisiteEditorPreview({
         `/api/minisites/${minisite.id}/restore/${versionId}`,
         { method: 'POST' }
       );
+      if (!res?.minisite) {
+        throw new Error('O servidor não retornou a versão restaurada do minisite.');
+      }
       hydrateFromDetail(res.minisite);
       setShowVersions(false);
       setSaveStatus('saved');
@@ -570,7 +856,14 @@ export function MinisiteEditorPreview({
     ],
   };
 
-  const publicDemoUrl = `${window.location.origin}/demo/${slug || minisite.slug}`;
+  const activeSlug = slug || minisite.slug;
+  const canonicalPublicPath = buildPublicMinisitePath(activeSlug);
+  const canonicalPublicUrl = buildPublicMinisiteUrl(activeSlug, {
+    publicBaseUrl,
+  });
+  const localOpenPath = buildLocalMinisitePreviewPath(activeSlug, minisite.status);
+  const publicDemoUrl = `${window.location.origin}/demo/${activeSlug}`;
+  const slugValidation = validateSlug(slug);
 
   return (
     <div className="space-y-5">
@@ -587,14 +880,19 @@ export function MinisiteEditorPreview({
           </button>
           <span className="text-slate-300">|</span>
           <div className="min-w-0">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <h1 className="text-base font-bold text-[#10253D] truncate">
                 {title || minisite.title}
               </h1>
               <StatusIndicator status={minisite.status} />
+              {minisite.hasUnpublishedChanges && (
+                <span className="text-[10px] font-semibold text-amber-800 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded">
+                  Alterações não republicadas
+                </span>
+              )}
             </div>
-            <div className="text-xs font-mono text-slate-500 truncate">
-              {slug || minisite.slug}.{baseDomain}
+            <div className="text-xs font-mono text-[#1677F2] truncate" title={canonicalPublicUrl}>
+              {canonicalPublicPath}
             </div>
           </div>
         </div>
@@ -617,8 +915,39 @@ export function MinisiteEditorPreview({
                 className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-[#10253D] cursor-pointer disabled:opacity-50"
               >
                 <Save className="w-3.5 h-3.5" />
-                <span>Salvar</span>
+                <span>Salvar rascunho</span>
               </button>
+
+              {profile.role === 'administrador' && (
+                <>
+                  <button
+                    type="button"
+                    disabled={publishingAction}
+                    onClick={handlePublishSnapshot}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold cursor-pointer disabled:opacity-50"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                    <span>
+                      {publishingAction
+                        ? 'Publicando...'
+                        : minisite.status === 'publicado'
+                          ? 'Republicar'
+                          : 'Publicar'}
+                    </span>
+                  </button>
+
+                  {minisite.status === 'publicado' && (
+                    <button
+                      type="button"
+                      disabled={publishingAction}
+                      onClick={handleUnpublish}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-900 text-xs font-semibold cursor-pointer disabled:opacity-50"
+                    >
+                      <span>Despublicar</span>
+                    </button>
+                  )}
+                </>
+              )}
 
               <button
                 type="button"
@@ -638,7 +967,7 @@ export function MinisiteEditorPreview({
                 <option value="rascunho">Rascunho</option>
                 <option value="demonstracao">Demonstração</option>
                 <option value="publicado" disabled={profile.role !== 'administrador'}>
-                  Publicado (Admin)
+                  Publicado (/{slug || minisite.slug})
                 </option>
                 <option value="desativado">Desativado</option>
               </select>
@@ -676,12 +1005,38 @@ export function MinisiteEditorPreview({
 
           <button
             type="button"
-            onClick={() => onNavigate(`/demo/${slug || minisite.slug}`)}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#1677F2] hover:bg-[#1262CA] text-white text-xs font-semibold cursor-pointer"
+            onClick={() => {
+              const target = minisite.status === 'publicado' ? canonicalPublicUrl : publicDemoUrl;
+              navigator.clipboard?.writeText(target);
+              setCopiedUrl(true);
+              setTimeout(() => setCopiedUrl(false), 1800);
+            }}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-[#10253D] cursor-pointer"
           >
-            <ExternalLink className="w-3.5 h-3.5" />
-            <span>Abrir página</span>
+            {copiedUrl ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+            <span>{copiedUrl ? 'Copiado' : 'Copiar link'}</span>
           </button>
+
+          {minisite.status === 'publicado' ? (
+            <a
+              href={`/${slug || minisite.slug}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#1677F2] hover:bg-[#1262CA] text-white text-xs font-semibold"
+            >
+              <ExternalLink className="w-3.5 h-3.5" />
+              <span>Abrir site</span>
+            </a>
+          ) : (
+            <button
+              type="button"
+              onClick={() => onNavigate(`/demo/${slug || minisite.slug}`)}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#1677F2] hover:bg-[#1262CA] text-white text-xs font-semibold cursor-pointer"
+            >
+              <ExternalLink className="w-3.5 h-3.5" />
+              <span>Abrir prévia</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -824,18 +1179,16 @@ export function MinisiteEditorPreview({
                     </div>
                     <div className="flex items-center gap-3">
                       {theme.logoImage ? (
-                        <img
+                        <ResilientImage
                           src={theme.logoImage}
                           alt="Logo"
+                          variant="avatar"
                           referrerPolicy="no-referrer"
-                          className="w-14 h-14 rounded-full object-cover border border-slate-200 bg-white shrink-0"
+                          className="w-14 h-14 rounded-xl object-cover border border-slate-200 bg-white shrink-0"
                         />
                       ) : (
-                        <div
-                          className="w-14 h-14 rounded-full flex items-center justify-center text-white font-bold text-sm shrink-0"
-                          style={{ backgroundColor: theme.primaryColor || '#1677F2' }}
-                        >
-                          {(title || 'FL').slice(0, 2).toUpperCase()}
+                        <div className="w-14 h-14 rounded-xl border border-dashed border-slate-300 bg-white flex items-center justify-center text-slate-400 shrink-0">
+                          <ImagePlus className="w-5 h-5" />
                         </div>
                       )}
                       <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-xs font-medium text-[#10253D] cursor-pointer">
@@ -858,6 +1211,11 @@ export function MinisiteEditorPreview({
                         />
                       </label>
                     </div>
+                    {theme.logoImage?.includes('/api/google/place-photo') && (
+                      <p className="text-[11px] text-slate-500">
+                        Imagem de perfil provisória preenchida com foto do Google (editável; não representa logotipo oficial).
+                      </p>
+                    )}
                     <input
                       type="text"
                       value={theme.logoImage || ''}
@@ -895,9 +1253,10 @@ export function MinisiteEditorPreview({
                           className="w-20 h-14 rounded-lg object-cover border border-slate-200 bg-black shrink-0"
                         />
                       ) : theme.coverImage ? (
-                        <img
+                        <ResilientImage
                           src={theme.coverImage}
                           alt="Capa"
+                          variant="thumb"
                           referrerPolicy="no-referrer"
                           className="w-20 h-14 rounded-lg object-cover border border-slate-200 bg-white shrink-0"
                         />
@@ -959,7 +1318,7 @@ export function MinisiteEditorPreview({
                       Vídeo: MP4, curto (até 15 s), até 30 MB. Vídeo vertical de celular (9:16) também serve,
                       mas aparece cortado.
                     </li>
-                    <li>Logo: quadrada, 400 × 400 px (aparece redonda).</li>
+                    <li>Logo / imagem de perfil: quadrada, 400 × 400 px.</li>
                   </ul>
                 </div>
 
@@ -970,18 +1329,123 @@ export function MinisiteEditorPreview({
                   </div>
                   <ol className="list-decimal pl-4 space-y-1 text-[11px]">
                     <li>
-                      Peça ao cliente o arquivo MP4 original do Reel ou utilize o vídeo autorizado em seu aparelho.
+                      No Instagram, abra o Reel, toque em <strong>Compartilhar</strong> e em <strong>Copiar link</strong> (ou solicite o MP4 ao cliente).
                     </li>
                     <li>
-                      Confira se o arquivo tem no máximo 30 MB e duração curta (até 15 s) para carregamento instantâneo.
+                      Baixe o vídeo em formato MP4 (curto, até 15 s e no máximo 30 MB).
                     </li>
                     <li>
-                      Clique em <strong>Enviar capa</strong> acima e selecione o arquivo MP4 baixado.
+                      Volte aqui e clique em <strong>Enviar capa</strong> acima para enviar o arquivo MP4.
                     </li>
                   </ol>
                   <p className="text-[11px] text-slate-500">
-                    Use só vídeos do seu cliente, com a autorização dele. Vídeo de até 30 MB.
+                    Use só vídeos do seu cliente, com a autorização dele. Se o vídeo for maior que 30 MB, escolha uma qualidade menor antes de enviar.
                   </p>
+                </div>
+
+                {/* Google Places Sync + Photo Picker */}
+                <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/70 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <div className="text-xs font-bold text-[#10253D]">
+                        Dados e fotos do Google Places
+                      </div>
+                      <p className="text-[11px] text-slate-600 mt-0.5">
+                        Quando não há logo manual nem logotipo identificado, a importação usa uma foto do Google
+                        como imagem de perfil provisória editável (além da capa quando vazia). Escolha abaixo para
+                        capa, galeria ou logo, ou envie arquivos manuais.
+                      </p>
+                    </div>
+                    {!isDemoSession && profile && (
+                      <button
+                        type="button"
+                        disabled={refreshingGoogle || !minisite.business?.googlePlaceId}
+                        onClick={handleRefreshGoogleData}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-[#10253D] cursor-pointer disabled:opacity-50 shrink-0"
+                      >
+                        <RefreshCw
+                          className={`w-3.5 h-3.5 ${refreshingGoogle ? 'animate-spin' : ''}`}
+                        />
+                        <span>
+                          {refreshingGoogle ? 'Atualizando...' : 'Atualizar dados do Google'}
+                        </span>
+                      </button>
+                    )}
+                  </div>
+
+                  {!minisite.business?.googlePlaceId && (
+                    <div className="text-[11px] text-slate-500">
+                      Este minisite foi criado sem um Place ID vinculado.
+                    </div>
+                  )}
+
+                  {googleRefreshFeedback && (
+                    <div
+                      className={`p-2.5 rounded-lg border text-xs flex items-center justify-between gap-2 ${
+                        googleRefreshFeedback.type === 'success'
+                          ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                          : 'bg-red-50 border-red-200 text-red-700'
+                      }`}
+                    >
+                      <span>{googleRefreshFeedback.message}</span>
+                      <button
+                        type="button"
+                        onClick={() => setGoogleRefreshFeedback(null)}
+                        className="shrink-0 opacity-70 hover:opacity-100 cursor-pointer"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  )}
+
+                  {googlePhotos.length > 0 && (
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 pt-1">
+                      {googlePhotos.slice(0, 9).map((ph, gIdx) => (
+                        <div
+                          key={`${ph.url}-${gIdx}`}
+                          className="rounded-lg border border-slate-200 bg-white overflow-hidden flex flex-col"
+                        >
+                          <ResilientImage
+                            src={ph.url}
+                            alt={`Google foto ${gIdx + 1}`}
+                            variant="gallery"
+                            loading="lazy"
+                            fallbackLabel="Foto indisponível"
+                            referrerPolicy="no-referrer"
+                            className="w-full h-20 object-cover"
+                          />
+                          <div className="p-2 space-y-1.5 flex-1 flex flex-col justify-between">
+                            <div className="text-[10px] text-slate-500 truncate">
+                              {ph.attributionName || 'Google Maps'}
+                            </div>
+                            <div className="flex flex-wrap gap-1">
+                              <button
+                                type="button"
+                                onClick={() => applyGooglePhotoAsCover(ph)}
+                                className="px-1.5 py-1 rounded border border-slate-200 hover:bg-slate-50 text-[10px] font-semibold text-[#10253D] cursor-pointer"
+                              >
+                                Capa
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => addGooglePhotoToGallery(ph)}
+                                className="px-1.5 py-1 rounded border border-slate-200 hover:bg-slate-50 text-[10px] font-semibold text-[#10253D] cursor-pointer"
+                              >
+                                + Galeria
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => applyGooglePhotoAsLogo(ph)}
+                                className="px-1.5 py-1 rounded border border-slate-200 hover:bg-slate-50 text-[10px] font-semibold text-[#10253D] cursor-pointer"
+                              >
+                                Logo
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -1588,9 +2052,16 @@ export function MinisiteEditorPreview({
                                     />
                                   </div>
                                 </div>
+                                {typeof c.rating === 'number' && (
+                                  <div className="text-[11px] text-slate-600">
+                                    Nota geral: <strong>{c.rating.toFixed(1)}★</strong> (
+                                    {typeof c.userRatingCount === 'number' ? c.userRatingCount : 0}{' '}
+                                    avaliações no Google)
+                                  </div>
+                                )}
                                 <div className="space-y-1.5">
                                   <div className="text-[11px] font-medium text-slate-600">
-                                    Depoimentos importados ({((c.reviews as GoogleReviewItem[]) || []).length})
+                                    Avaliações importadas ({((c.reviews as GoogleReviewItem[]) || []).length})
                                   </div>
                                   {((c.reviews as GoogleReviewItem[]) || []).map((rev, rIdx, arr) => (
                                     <div
@@ -1601,6 +2072,11 @@ export function MinisiteEditorPreview({
                                         <span className="font-semibold text-[#10253D]">
                                           {rev.authorName} ({rev.rating}★)
                                         </span>
+                                        {rev.relativeTime && (
+                                          <span className="text-[10px] text-slate-400 ml-1.5">
+                                            {rev.relativeTime}
+                                          </span>
+                                        )}
                                         <p className="text-slate-600 line-clamp-2">{rev.text}</p>
                                       </div>
                                       <button
@@ -1641,9 +2117,11 @@ export function MinisiteEditorPreview({
                                       key={gIdx}
                                       className="relative rounded-lg overflow-hidden border border-slate-200 aspect-[4/3]"
                                     >
-                                      <img
+                                      <ResilientImage
                                         src={img.url}
                                         alt=""
+                                        variant="gallery"
+                                        loading="lazy"
                                         referrerPolicy="no-referrer"
                                         className="w-full h-full object-cover"
                                       />
@@ -2076,6 +2554,104 @@ export function MinisiteEditorPreview({
 
           {activeTab === 'aparencia' && (
             <div className="space-y-6">
+              {/* Estilo do site */}
+              <div className="space-y-2.5">
+                <div>
+                  <h2 className="text-sm font-bold text-[#10253D]">Estilo do site</h2>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Muda o desenho do site inteiro. Escolher um estilo aplica as cores sugeridas dele; depois você ajusta as cores abaixo. A foto ou vídeo do topo é a Capa, na aba Conteúdo.
+                  </p>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {SITE_STYLE_PRESETS.map((preset) => {
+                    const isSelected = (theme.siteStyle || 'vibrante') === preset.id;
+                    const primary = preset.patch.primaryColor || '#1677F2';
+                    const bg = preset.patch.backgroundColor || '#FFFFFF';
+                    return (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        onClick={() => {
+                          setTheme((t) => ({
+                            ...t,
+                            ...preset.patch,
+                            serviceCardBg: undefined,
+                          }));
+                          markDirty();
+                        }}
+                        className={`text-left p-3 rounded-xl border transition-colors cursor-pointer flex items-start justify-between gap-2 ${
+                          isSelected
+                            ? 'border-[#1677F2] bg-sky-50/50 ring-1 ring-[#1677F2]'
+                            : 'border-slate-200 hover:border-slate-300 bg-white'
+                        }`}
+                      >
+                        <div>
+                          <div className="text-xs font-bold text-[#10253D]">{preset.label}</div>
+                          <div className="text-[11px] text-slate-500 mt-0.5">{preset.description}</div>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0 pt-0.5">
+                          <span
+                            className="w-4 h-4 rounded-full border border-black/15"
+                            style={{ backgroundColor: primary }}
+                          />
+                          <span
+                            className="w-4 h-4 rounded-full border border-black/15"
+                            style={{ backgroundColor: bg }}
+                          />
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Temas por segmento */}
+              <div className="pt-4 border-t border-slate-100 space-y-2.5">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                  Temas por segmento
+                </h3>
+                <div className="flex flex-wrap gap-1.5">
+                  {SEGMENT_THEMES.map((seg) => {
+                    const active =
+                      theme.primaryColor?.toLowerCase() === seg.primaryColor.toLowerCase() &&
+                      theme.backgroundColor?.toLowerCase() === seg.backgroundColor.toLowerCase();
+                    return (
+                      <button
+                        key={seg.id}
+                        type="button"
+                        onClick={() => {
+                          const balanced = enforceThemePaletteContrast({
+                            primaryColor: seg.primaryColor,
+                            secondaryColor: seg.secondaryColor,
+                            accentColor: seg.secondaryColor,
+                            backgroundColor: seg.backgroundColor,
+                            surfaceColor: seg.surfaceColor,
+                            textColor: seg.textColor,
+                            buttonTextColor: seg.buttonTextColor,
+                          });
+                          setTheme((t) => ({
+                            ...t,
+                            ...balanced,
+                          }));
+                          markDirty();
+                        }}
+                        className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-semibold transition-colors cursor-pointer ${
+                          active
+                            ? 'border-[#1677F2] bg-sky-50 text-[#10253D]'
+                            : 'border-slate-200 bg-white hover:border-slate-300 text-slate-700'
+                        }`}
+                      >
+                        <span
+                          className="w-2.5 h-2.5 rounded-full border border-black/15 shrink-0"
+                          style={{ backgroundColor: seg.primaryColor }}
+                        />
+                        <span>{seg.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
               {/* Automatic Visual Identity Analysis Card */}
               <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/70 space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-3">
@@ -2123,16 +2699,240 @@ export function MinisiteEditorPreview({
                 )}
               </div>
 
-              <div>
-                <h2 className="text-sm font-bold text-[#10253D] flex items-center gap-2">
-                  <Palette className="w-4 h-4 text-[#1677F2]" />
-                  <span>Paletas de cores sugeridas</span>
-                </h2>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Aplique uma paleta harmônica em um clique ou personalize cada cor abaixo.
-                </p>
+              {/* Cores */}
+              <div className="pt-4 border-t border-slate-100 space-y-3">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                  Cores
+                </h3>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  {[
+                    { key: 'primaryColor', label: 'Principal', fallback: '#C2410C' },
+                    { key: 'backgroundColor', label: 'Fundo', fallback: '#FFF8EE' },
+                    { key: 'textColor', label: 'Texto', fallback: '#2B1D14' },
+                  ].map((field) => {
+                    const val = String(
+                      (theme as Record<string, unknown>)[field.key] || field.fallback
+                    );
+                    return (
+                      <div key={field.key} className="space-y-1">
+                        <label className="block text-xs font-semibold text-[#10253D]">
+                          {field.label}
+                        </label>
+                        <div className="flex items-center gap-2 border border-slate-200 rounded-lg px-2.5 py-2 bg-white">
+                          <input
+                            type="color"
+                            value={/^#[0-9a-fA-F]{6}$/.test(val) ? val : field.fallback}
+                            onChange={(e) => {
+                              setTheme((t) => ({ ...t, [field.key]: e.target.value }));
+                              markDirty();
+                            }}
+                            className="w-7 h-7 rounded border-0 cursor-pointer bg-transparent shrink-0"
+                          />
+                          <input
+                            type="text"
+                            value={val.toUpperCase()}
+                            onChange={(e) => {
+                              setTheme((t) => ({ ...t, [field.key]: e.target.value }));
+                              markDirty();
+                            }}
+                            className="w-full text-xs font-mono text-[#10253D] focus:outline-none"
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
+                {/* Secondary fine-grain pickers */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 pt-1">
+                  {[
+                    { key: 'secondaryColor', label: 'Selo / secundária', fallback: '#FACC15' },
+                    { key: 'accentColor', label: 'Detalhe', fallback: '#EC4899' },
+                    { key: 'surfaceColor', label: 'Cartões', fallback: '#FFFFFF' },
+                    { key: 'serviceCardBg', label: 'Cards de serviços', fallback: '#F7F3EA' },
+                  ].map((field) => {
+                    const val = String(
+                      (theme as Record<string, unknown>)[field.key] || field.fallback
+                    );
+                    return (
+                      <div key={field.key} className="space-y-1">
+                        <label className="block text-[11px] font-medium text-slate-600">
+                          {field.label}
+                        </label>
+                        <div className="flex items-center gap-1.5 border border-slate-200 rounded-lg px-2 py-1.5 bg-white">
+                          <input
+                            type="color"
+                            value={/^#[0-9a-fA-F]{6}$/.test(val) ? val : field.fallback}
+                            onChange={(e) => {
+                              setTheme((t) => ({ ...t, [field.key]: e.target.value }));
+                              markDirty();
+                            }}
+                            className="w-5 h-5 rounded border-0 cursor-pointer bg-transparent shrink-0"
+                          />
+                          <input
+                            type="text"
+                            value={val.toUpperCase()}
+                            onChange={(e) => {
+                              setTheme((t) => ({ ...t, [field.key]: e.target.value }));
+                              markDirty();
+                            }}
+                            className="w-full text-[11px] font-mono text-[#10253D] focus:outline-none"
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Estilo: Fonte, Botões, Serviços e produtos, Cantos */}
+              <div className="pt-4 border-t border-slate-100 space-y-4">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                  Estilo
+                </h3>
+
+                {/* Fonte */}
+                <div className="space-y-1.5">
+                  <label className="block text-xs font-semibold text-[#10253D]">Fonte</label>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    {FONT_STYLE_OPTIONS.map((fontOpt) => {
+                      const active =
+                        (theme.fontFamily || 'Plus Jakarta Sans').toLowerCase() ===
+                        fontOpt.id.toLowerCase();
+                      return (
+                        <button
+                          key={fontOpt.id}
+                          type="button"
+                          onClick={() => {
+                            setTheme((t) => ({ ...t, fontFamily: fontOpt.id }));
+                            markDirty();
+                          }}
+                          style={{ fontFamily: fontOpt.cssValue }}
+                          className={`px-3 py-2 rounded-lg border text-xs font-semibold cursor-pointer transition-colors ${
+                            active
+                              ? 'border-[#1677F2] bg-sky-50 text-[#10253D]'
+                              : 'border-slate-200 bg-white hover:border-slate-300 text-slate-700'
+                          }`}
+                        >
+                          {fontOpt.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Botões */}
+                <div className="space-y-1.5">
+                  <label className="block text-xs font-semibold text-[#10253D]">Botões</label>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    {[
+                      { id: 'solid', label: 'Preenchido' },
+                      { id: 'soft', label: 'Suave' },
+                      { id: 'outline', label: 'Contorno' },
+                      { id: 'gradient', label: 'Degradê' },
+                    ].map((btnOpt) => {
+                      const active = (theme.buttonStyle || 'solid') === btnOpt.id;
+                      return (
+                        <button
+                          key={btnOpt.id}
+                          type="button"
+                          onClick={() => {
+                            setTheme((t) => ({
+                              ...t,
+                              buttonStyle: btnOpt.id as MinisiteTheme['buttonStyle'],
+                            }));
+                            markDirty();
+                          }}
+                          className={`px-3 py-2 rounded-lg border text-xs font-semibold cursor-pointer transition-colors ${
+                            active
+                              ? 'border-[#1677F2] bg-sky-50 text-[#10253D]'
+                              : 'border-slate-200 bg-white hover:border-slate-300 text-slate-700'
+                          }`}
+                        >
+                          {btnOpt.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Serviços (agenda) e produtos */}
+                <div className="space-y-1.5">
+                  <label className="block text-xs font-semibold text-[#10253D]">
+                    Serviços (agenda) e produtos
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {[
+                      { id: 'stacked', label: 'Empilhado' },
+                      { id: 'carousel', label: 'Carrossel' },
+                    ].map((layoutOpt) => {
+                      const active = (theme.servicesLayout || 'stacked') === layoutOpt.id;
+                      return (
+                        <button
+                          key={layoutOpt.id}
+                          type="button"
+                          onClick={() => {
+                            setTheme((t) => ({
+                              ...t,
+                              servicesLayout: layoutOpt.id as MinisiteTheme['servicesLayout'],
+                            }));
+                            markDirty();
+                          }}
+                          className={`px-3 py-2 rounded-lg border text-xs font-semibold cursor-pointer transition-colors ${
+                            active
+                              ? 'border-[#1677F2] bg-sky-50 text-[#10253D]'
+                              : 'border-slate-200 bg-white hover:border-slate-300 text-slate-700'
+                          }`}
+                        >
+                          {layoutOpt.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Cantos */}
+                <div className="space-y-1.5">
+                  <label className="block text-xs font-semibold text-[#10253D]">Cantos</label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {[
+                      { id: 'md', label: 'Retos' },
+                      { id: 'xl', label: 'Arredondados' },
+                      { id: 'full', label: 'Pílula' },
+                    ].map((radOpt) => {
+                      const active = (theme.buttonRadius || 'full') === radOpt.id;
+                      return (
+                        <button
+                          key={radOpt.id}
+                          type="button"
+                          onClick={() => {
+                            setTheme((t) => ({
+                              ...t,
+                              buttonRadius: radOpt.id as MinisiteTheme['buttonRadius'],
+                            }));
+                            markDirty();
+                          }}
+                          className={`px-3 py-2 rounded-lg border text-xs font-semibold cursor-pointer transition-colors ${
+                            active
+                              ? 'border-[#1677F2] bg-sky-50 text-[#10253D]'
+                              : 'border-slate-200 bg-white hover:border-slate-300 text-slate-700'
+                          }`}
+                        >
+                          {radOpt.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+
+              {/* Paletas sugeridas e Template */}
+              <div className="pt-4 border-t border-slate-100 space-y-3">
+                <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
+                  <Palette className="w-3.5 h-3.5 text-[#1677F2]" />
+                  <span>Paletas prontas & segmento</span>
+                </h2>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                   {CURATED_PALETTES.map((pal) => {
                     const isSelected =
                       theme.primaryColor?.toLowerCase() === pal.theme.primaryColor.toLowerCase() &&
@@ -2146,7 +2946,7 @@ export function MinisiteEditorPreview({
                           setTheme((t) => ({ ...t, ...pal.theme, serviceCardBg: undefined }));
                           markDirty();
                         }}
-                        className={`text-left p-3 rounded-xl border transition-colors cursor-pointer ${
+                        className={`text-left p-2.5 rounded-xl border transition-colors cursor-pointer ${
                           isSelected
                             ? 'border-[#1677F2] bg-sky-50/40'
                             : 'border-slate-200 hover:border-slate-300 bg-white'
@@ -2163,115 +2963,21 @@ export function MinisiteEditorPreview({
                             ].map((hex, i) => (
                               <span
                                 key={i}
-                                className="w-4 h-4 rounded-full border border-black/15"
+                                className="w-3.5 h-3.5 rounded-full border border-black/15"
                                 style={{ backgroundColor: hex }}
                               />
                             ))}
                           </div>
                         </div>
-                        <div className="text-[11px] text-slate-500 mt-1">{pal.segmentHint}</div>
+                        <div className="text-[11px] text-slate-500 mt-0.5">{pal.segmentHint}</div>
                       </button>
                     );
                   })}
                 </div>
-              </div>
-
-              {/* Fine-grain Color Pickers */}
-              <div className="pt-4 border-t border-slate-100 space-y-3">
-                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500">
-                  Ajuste fino de cores
-                </h3>
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                  {[
-                    { key: 'primaryColor', label: 'Botões / destaque' },
-                    { key: 'secondaryColor', label: 'Selo / secundária' },
-                    { key: 'accentColor', label: 'Detalhe da capa' },
-                    { key: 'backgroundColor', label: 'Fundo da página' },
-                    { key: 'surfaceColor', label: 'Fundo dos cartões' },
-                    { key: 'serviceCardBg', label: 'Cards de serviços' },
-                    { key: 'textColor', label: 'Cor do texto' },
-                  ].map((field) => {
-                    const val = String(
-                      (theme as Record<string, unknown>)[field.key] || '#1677F2'
-                    );
-                    return (
-                      <div key={field.key} className="space-y-1">
-                        <label className="block text-[11px] font-medium text-slate-600">
-                          {field.label}
-                        </label>
-                        <div className="flex items-center gap-2 border border-slate-200 rounded-lg px-2 py-1.5 bg-white">
-                          <input
-                            type="color"
-                            value={/^#[0-9a-fA-F]{6}$/.test(val) ? val : '#1677F2'}
-                            onChange={(e) => {
-                              setTheme((t) => ({ ...t, [field.key]: e.target.value }));
-                              markDirty();
-                            }}
-                            className="w-6 h-6 rounded border-0 cursor-pointer bg-transparent"
-                          />
-                          <input
-                            type="text"
-                            value={val}
-                            onChange={(e) => {
-                              setTheme((t) => ({ ...t, [field.key]: e.target.value }));
-                              markDirty();
-                            }}
-                            className="w-full text-xs font-mono text-[#10253D] focus:outline-none"
-                          />
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Button Style, Radius & Template */}
-              <div className="pt-4 border-t border-slate-100 grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-semibold text-[#10253D] mb-1">
-                    Estilo dos botões
-                  </label>
-                  <select
-                    value={theme.buttonStyle || 'solid'}
-                    onChange={(e) => {
-                      setTheme((t) => ({
-                        ...t,
-                        buttonStyle: e.target.value as MinisiteTheme['buttonStyle'],
-                      }));
-                      markDirty();
-                    }}
-                    className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-white text-xs text-[#10253D]"
-                  >
-                    <option value="solid">Sólido com relevo</option>
-                    <option value="gradient">Degradê com a marca</option>
-                    <option value="outline">Contorno limpo</option>
-                  </select>
-                </div>
 
                 <div>
                   <label className="block text-xs font-semibold text-[#10253D] mb-1">
-                    Arredondamento
-                  </label>
-                  <select
-                    value={theme.buttonRadius || 'xl'}
-                    onChange={(e) => {
-                      setTheme((t) => ({
-                        ...t,
-                        buttonRadius: e.target.value as MinisiteTheme['buttonRadius'],
-                      }));
-                      markDirty();
-                    }}
-                    className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-white text-xs text-[#10253D]"
-                  >
-                    <option value="md">Moderado</option>
-                    <option value="xl">Cartão arredondado</option>
-                    <option value="full">Pílula completa</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-[#10253D] mb-1">
-                    Segmento / Template
+                    Segmento / Template base
                   </label>
                   <select
                     value={templateId}
@@ -2288,106 +2994,201 @@ export function MinisiteEditorPreview({
                     ))}
                   </select>
                 </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-[#10253D] mb-1">
-                    Estilo da capa
-                  </label>
-                  <select
-                    value={theme.heroStyle || 'card'}
-                    onChange={(e) => {
-                      setTheme((t) => ({
-                        ...t,
-                        heroStyle: e.target.value as MinisiteTheme['heroStyle'],
-                      }));
-                      markDirty();
-                    }}
-                    className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-white text-xs text-[#10253D]"
-                  >
-                    <option value="card">Cartão expressivo com formas</option>
-                    <option value="minimal">Limpo sem formas extras</option>
-                  </select>
-                </div>
               </div>
             </div>
           )}
 
           {activeTab === 'ajustes' && (
-            <div className="space-y-4">
-              <h2 className="text-sm font-bold text-[#10253D]">Ajustes de SEO e publicação</h2>
+            <div className="space-y-6">
+              {/* WhatsApp principal */}
+              <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/70 space-y-3">
+                <div>
+                  <h2 className="text-sm font-bold text-[#10253D]">WhatsApp principal</h2>
+                  <p className="text-xs text-slate-600 mt-0.5">
+                    Usado no botão flutuante e nos links diretos de atendimento.
+                  </p>
+                </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-[#10253D] mb-1">
-                  Slug / Subdomínio
-                </label>
-                <div className="flex items-center rounded-lg border border-slate-300 overflow-hidden">
+                <div>
+                  <label className="block text-xs font-semibold text-[#10253D] mb-1">
+                    Número com DDD
+                  </label>
                   <input
                     type="text"
-                    value={slug}
+                    value={businessProfile.whatsapp}
                     onChange={(e) => {
-                      setSlug(e.target.value);
+                      const nextWhatsapp = e.target.value;
+                      setBusinessProfile((bp) => ({ ...bp, whatsapp: nextWhatsapp }));
                       markDirty();
                     }}
-                    className="flex-1 px-3 py-2 text-xs font-mono text-[#10253D] focus:outline-none"
+                    placeholder="21971171244"
+                    className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-white text-xs text-[#10253D]"
                   />
-                  <span className="px-3 py-2 bg-slate-50 border-l border-slate-200 text-xs font-mono text-slate-500">
-                    .{baseDomain}
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-[#10253D] mb-1">
+                    Mensagem inicial
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={theme.whatsappDefaultMessage || ''}
+                    onChange={(e) => {
+                      setTheme((t) => ({ ...t, whatsappDefaultMessage: e.target.value }));
+                      markDirty();
+                    }}
+                    placeholder={`Oi! Vim pelo site e quero falar com ${title || 'a equipe'}.`}
+                    className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-white text-xs text-[#10253D]"
+                  />
+                </div>
+
+                <label className="flex items-start gap-2.5 text-xs text-slate-700 cursor-pointer pt-1">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(theme.fixedWhatsappButton)}
+                    onChange={(e) => {
+                      setTheme((t) => ({ ...t, fixedWhatsappButton: e.target.checked }));
+                      markDirty();
+                    }}
+                    className="mt-0.5"
+                  />
+                  <span>
+                    Mostrar o botão flutuante do WhatsApp na parte de baixo do site. Desmarque para tirar; o número continua nos blocos que você adicionar.
+                  </span>
+                </label>
+              </div>
+
+              {/* Endereço do site */}
+              <div className="pt-4 border-t border-slate-100 space-y-2.5">
+                <h2 className="text-sm font-bold text-[#10253D]">Endereço do site</h2>
+                <div className="flex flex-wrap sm:flex-nowrap items-center gap-2">
+                  <div className="flex-1 flex items-center rounded-lg border border-slate-300 overflow-hidden bg-white min-w-0">
+                    <span className="px-3 py-2 bg-slate-50 border-r border-slate-200 text-xs font-mono text-slate-500 truncate max-w-[260px]">
+                      {publicBaseUrl}/
+                    </span>
+                    <input
+                      type="text"
+                      value={slug}
+                      onChange={(e) => {
+                        setSlug(e.target.value.toLowerCase());
+                        markDirty();
+                      }}
+                      className="flex-1 px-3 py-2 text-xs font-mono text-[#10253D] focus:outline-none min-w-0"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    disabled={saveStatus === 'saving' || !slugValidation.valid}
+                    onClick={() => void persistSave()}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#10253D] hover:bg-[#193556] text-white text-xs font-semibold cursor-pointer disabled:opacity-50 shrink-0"
+                  >
+                    <Save className="w-3.5 h-3.5" />
+                    <span>{saveStatus === 'saving' ? 'Salvando…' : 'Salvar'}</span>
+                  </button>
+                </div>
+                {!slugValidation.valid && (
+                  <p className="text-[11px] text-red-600">{slugValidation.reason}</p>
+                )}
+                <p className="text-[11px] text-slate-500">
+                  Ao alterar o endereço de um minisite publicado, o slug anterior fica salvo automaticamente como redirecionamento permanente (preservando parâmetros de campanha), sem exigir novo deploy.
+                </p>
+                {Array.isArray(minisite.slugAliases) && minisite.slugAliases.length > 0 && (
+                  <div className="text-[11px] text-slate-600 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
+                    <span className="font-semibold text-[#10253D]">Endereços anteriores redirecionando para cá: </span>
+                    <span className="font-mono">
+                      {minisite.slugAliases.map((a) => `/${a}`).join(', ')}
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {/* Publicação toggle */}
+              <div className="pt-4 border-t border-slate-100 space-y-3">
+                <h2 className="text-sm font-bold text-[#10253D]">Publicação</h2>
+                <div className="p-3.5 rounded-xl border border-slate-200 bg-white flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-xs font-bold text-[#10253D]">Site publicado</div>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      Quando desligado, o endereço mostra &ldquo;página não encontrada&rdquo;.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={minisite.status === 'publicado'}
+                    disabled={publishingAction || profile?.role !== 'administrador' || isDemoSession}
+                    onClick={() => {
+                      if (minisite.status === 'publicado') {
+                        void handleUnpublish();
+                      } else {
+                        void handlePublishSnapshot();
+                      }
+                    }}
+                    className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors disabled:opacity-50 ${
+                      minisite.status === 'publicado' ? 'bg-emerald-500' : 'bg-slate-300'
+                    }`}
+                  >
+                    <span
+                      className={`pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                        minisite.status === 'publicado' ? 'translate-x-5' : 'translate-x-0'
+                      }`}
+                    />
+                  </button>
+                </div>
+                <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 flex items-start gap-2 text-[11px] text-slate-600">
+                  <ShieldAlert className="w-4 h-4 text-[#1677F2] shrink-0 mt-0.5" />
+                  <span>
+                    Publicação oficial em <strong className="font-mono">{canonicalPublicPath}</strong> exige perfil Administrador ({profile?.role === 'administrador' ? 'autorizado' : 'não autorizado'}).
                   </span>
                 </div>
               </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-[#10253D] mb-1">
-                  Título SEO
+              {/* SEO */}
+              <div className="pt-4 border-t border-slate-100 space-y-3">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                  Ajustes de SEO
+                </h3>
+                <div>
+                  <label className="block text-xs font-semibold text-[#10253D] mb-1">
+                    Título SEO
+                  </label>
+                  <input
+                    type="text"
+                    value={seo.title || ''}
+                    onChange={(e) => {
+                      setSeo((s) => ({ ...s, title: e.target.value }));
+                      markDirty();
+                    }}
+                    className="w-full px-3 py-2 rounded-lg border border-slate-300 text-xs text-[#10253D]"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-[#10253D] mb-1">
+                    Descrição SEO
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={seo.description || ''}
+                    onChange={(e) => {
+                      setSeo((s) => ({ ...s, description: e.target.value }));
+                      markDirty();
+                    }}
+                    className="w-full px-3 py-2 rounded-lg border border-slate-300 text-xs text-[#10253D]"
+                  />
+                </div>
+
+                <label className="inline-flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={seo.noIndex !== false}
+                    onChange={(e) => {
+                      setSeo((s) => ({ ...s, noIndex: e.target.checked }));
+                      markDirty();
+                    }}
+                  />
+                  <span>Manter prévia privada não indexada (noindex) até publicação oficial</span>
                 </label>
-                <input
-                  type="text"
-                  value={seo.title || ''}
-                  onChange={(e) => {
-                    setSeo((s) => ({ ...s, title: e.target.value }));
-                    markDirty();
-                  }}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-300 text-xs text-[#10253D]"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-[#10253D] mb-1">
-                  Descrição SEO
-                </label>
-                <textarea
-                  rows={2}
-                  value={seo.description || ''}
-                  onChange={(e) => {
-                    setSeo((s) => ({ ...s, description: e.target.value }));
-                    markDirty();
-                  }}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-300 text-xs text-[#10253D]"
-                />
-              </div>
-
-              <label className="inline-flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={seo.noIndex !== false}
-                  onChange={(e) => {
-                    setSeo((s) => ({ ...s, noIndex: e.target.checked }));
-                    markDirty();
-                  }}
-                />
-                <span>Manter prévia privada não indexada (noindex) até aprovação oficial</span>
-              </label>
-
-              <div className="p-3.5 rounded-lg bg-slate-50 border border-slate-200 flex items-start gap-2.5 text-xs text-slate-700">
-                <ShieldAlert className="w-4 h-4 text-[#1677F2] shrink-0 mt-0.5" />
-                <span>
-                  Publicação oficial no subdomínio {slug || minisite.slug}.{baseDomain} requer
-                  autorização de Administrador (
-                  {profile?.role === 'administrador'
-                    ? 'Você tem permissão'
-                    : 'Perfil atual não autorizado'}
-                  ).
-                </span>
               </div>
 
               {!isDemoSession && profile && (
@@ -2432,37 +3233,206 @@ export function MinisiteEditorPreview({
           )}
 
           {activeTab === 'compartilhar' && (
-            <div className="space-y-4">
-              <h2 className="text-sm font-bold text-[#10253D]">Links de acesso</h2>
-              <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 flex items-center justify-between gap-3">
-                <span className="text-xs font-mono text-[#10253D] break-all">{publicDemoUrl}</span>
+            <div className="space-y-5">
+              <div>
+                <h2 className="text-sm font-bold text-[#10253D]">Seu link</h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Visitantes acessam diretamente pelo caminho no mesmo domínio, sem login.
+                </p>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                    Link público canônico
+                  </span>
+                  <StatusIndicator status={minisite.status} />
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-xs font-mono text-[#10253D] break-all">
+                    {canonicalPublicUrl}
+                  </span>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard?.writeText(canonicalPublicUrl);
+                        setCopiedUrl(true);
+                        setTimeout(() => setCopiedUrl(false), 1800);
+                      }}
+                      className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-slate-300 bg-white text-xs font-semibold text-[#10253D] cursor-pointer"
+                    >
+                      {copiedUrl ? (
+                        <>
+                          <Check className="w-3.5 h-3.5 text-emerald-600" />
+                          <span>Copiado</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3.5 h-3.5" />
+                          <span>Copiar</span>
+                        </>
+                      )}
+                    </button>
+                    {minisite.status === 'publicado' && (
+                      <a
+                        href={localOpenPath}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title={`Abrir prévia local em ${window.location.origin}${localOpenPath}`}
+                        className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-[#1677F2] text-white text-xs font-semibold"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5" />
+                        <span>Abrir</span>
+                      </a>
+                    )}
+                  </div>
+                </div>
+                {minisite.status !== 'publicado' ? (
+                  <p className="text-[11px] text-amber-700">
+                    Este link retornará página não encontrada enquanto o minisite não for publicado.
+                  </p>
+                ) : (
+                  <p className="text-[11px] text-slate-500">
+                    Em desenvolvimento, &ldquo;Abrir&rdquo; testa a rota local (<span className="font-mono">{localOpenPath}</span>); o link copiado e o QR Code usam a origem pública configurada (<span className="font-mono">{publicBaseUrl}</span>), que requer a configuração pública publicada na Vercel.
+                  </p>
+                )}
+              </div>
+
+              {/* QR Code do site */}
+              <div className="p-4 rounded-xl border border-slate-200 bg-white space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h3 className="text-xs font-bold text-[#10253D] flex items-center gap-1.5">
+                      <QrCode className="w-4 h-4 text-[#1677F2]" />
+                      <span>QR Code do site</span>
+                    </h3>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      Codifica automaticamente <span className="font-mono">{canonicalPublicUrl}</span>.
+                    </p>
+                  </div>
+                  {qrCodeDataUrl && (
+                    <a
+                      href={qrCodeDataUrl}
+                      download={`qrcode-${activeSlug}.png`}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-[#10253D]"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Baixar PNG</span>
+                    </a>
+                  )}
+                </div>
+                {qrCodeDataUrl && (
+                  <div className="flex items-center justify-center p-4 bg-slate-50 rounded-xl border border-slate-100">
+                    <img
+                      src={qrCodeDataUrl}
+                      alt={`QR Code de ${title || minisite.title}`}
+                      className="w-44 h-44 rounded-lg border border-slate-200 bg-white p-1.5"
+                    />
+                  </div>
+                )}
+              </div>
+
+              {/* Links por canal */}
+              <div className="p-4 rounded-xl border border-slate-200 bg-white space-y-3">
+                <div>
+                  <h3 className="text-xs font-bold text-[#10253D]">Links por canal</h3>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    Use um link diferente em cada lugar para acompanhar de onde vêm seus acessos.
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  {[
+                    { key: 'instagram', label: 'Bio do Instagram' },
+                    { key: 'tiktok', label: 'Bio do TikTok' },
+                    { key: 'whatsapp', label: 'Status / mensagens do WhatsApp' },
+                    { key: 'google', label: 'Perfil no Google' },
+                    { key: 'nfc', label: 'Cartão NFC' },
+                    { key: 'youtube', label: 'Descrição do YouTube' },
+                  ].map((ch) => {
+                    const chUrl = buildChannelPublicMinisiteUrl(activeSlug, ch.key, {
+                      publicBaseUrl,
+                    });
+                    const isCopied = copiedChannelKey === ch.key;
+                    return (
+                      <div
+                        key={ch.key}
+                        className="flex items-center justify-between gap-2 p-2.5 rounded-lg border border-slate-200 bg-slate-50/60"
+                      >
+                        <div className="min-w-0">
+                          <div className="text-xs font-semibold text-[#10253D]">{ch.label}</div>
+                          <div className="text-[11px] font-mono text-slate-500 truncate">
+                            {chUrl}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigator.clipboard?.writeText(chUrl);
+                            setCopiedChannelKey(ch.key);
+                            setTimeout(() => setCopiedChannelKey(null), 1800);
+                          }}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-[11px] font-semibold text-[#10253D] shrink-0 cursor-pointer"
+                        >
+                          {isCopied ? (
+                            <>
+                              <Check className="w-3 h-3 text-emerald-600" />
+                              <span>Copiado</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="w-3 h-3" />
+                              <span>Copiar</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="p-3 rounded-lg bg-white border border-slate-200 text-xs text-slate-600 flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <Layers className="w-4 h-4 text-[#1677F2] shrink-0" />
+                  <span className="truncate">
+                    Rota local ativa e compatibilidade herdada:{' '}
+                    <strong className="font-mono">
+                      {`${window.location.origin}${canonicalPublicPath}`}
+                    </strong>
+                    {' · '}
+                    <span className="font-mono text-slate-500">/LinkFoco/{activeSlug}</span>
+                    {' · '}
+                    <span className="font-mono text-slate-500">/s/{activeSlug}</span>
+                  </span>
+                </div>
+                {minisite.status === 'publicado' && (
+                  <a
+                    href={localOpenPath}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs font-semibold text-[#1677F2] hover:underline shrink-0"
+                  >
+                    Abrir
+                  </a>
+                )}
+              </div>
+
+              <div className="p-3 rounded-lg bg-white border border-slate-200 text-xs text-slate-600 flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <Layers className="w-4 h-4 text-[#1677F2] shrink-0" />
+                  <span className="truncate">
+                    Prévia privada para demonstração:{' '}
+                    <strong className="font-mono">{publicDemoUrl}</strong>
+                  </span>
+                </div>
                 <button
                   type="button"
-                  onClick={() => {
-                    navigator.clipboard?.writeText(publicDemoUrl);
-                    setCopiedUrl(true);
-                    setTimeout(() => setCopiedUrl(false), 1800);
-                  }}
-                  className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-slate-300 bg-white text-xs font-semibold text-[#10253D] shrink-0 cursor-pointer"
+                  onClick={() => onNavigate(`/demo/${activeSlug}`)}
+                  className="text-xs font-semibold text-[#1677F2] hover:underline shrink-0 cursor-pointer"
                 >
-                  {copiedUrl ? (
-                    <>
-                      <Check className="w-3.5 h-3.5 text-emerald-600" />
-                      <span>Copiado</span>
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="w-3.5 h-3.5" />
-                      <span>Copiar</span>
-                    </>
-                  )}
+                  Abrir prévia
                 </button>
-              </div>
-              <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-600 flex items-center gap-2">
-                <Layers className="w-4 h-4 text-[#1677F2] shrink-0" />
-                <span>
-                  Subdomínio oficial configurado: <strong className="font-mono">{slug}.{baseDomain}</strong>
-                </span>
               </div>
             </div>
           )}

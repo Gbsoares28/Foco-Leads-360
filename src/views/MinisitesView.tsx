@@ -16,6 +16,13 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { StatusIndicator } from '../components/StatusIndicator';
+import { ResilientImage } from '../components/ResilientImage';
+import { preloadImageBatch } from '../lib/image-cache';
+import {
+  buildPublicMinisitePath,
+  buildPublicMinisiteUrl,
+  getConfiguredPublicBaseUrl,
+} from '../lib/slug-utils';
 
 interface MinisiteItem {
   id: number;
@@ -31,15 +38,17 @@ interface MinisiteItem {
   };
   viewsCount: number;
   isDemo: boolean;
+  hasUnpublishedChanges?: boolean;
   updatedAt: string;
   businessName: string;
   businessCategory: string;
   businessCity: string;
+  businessGooglePlaceId?: string | null;
 }
 
 interface MinisitesListResponse {
   items: MinisiteItem[];
-  baseDomain: string;
+  publicBaseUrl?: string;
   pagination: {
     page: number;
     pageSize: number;
@@ -68,12 +77,14 @@ interface GooglePlaceCandidate {
   directionsUri: string;
   reviewsUri: string;
   writeReviewUri: string;
+  photosUri?: string;
   rating: number | null;
   userRatingCount: number | null;
   reviews: Array<{
     authorName: string;
     authorUri?: string;
     authorPhotoUri?: string;
+    reviewUri?: string;
     rating: number;
     relativeTime: string;
     text: string;
@@ -111,7 +122,7 @@ export function MinisitesView({
   onNavigate: (path: string) => void;
   focusCreate?: boolean;
 }) {
-  const { apiFetch, showDemoData, isDemoSession, profile, signInWithGoogle } = useAuth();
+  const { apiFetch, showDemoData, isDemoSession, profile } = useAuth();
   const effectiveDemo = isDemoSession || showDemoData;
 
   // Creation form state
@@ -137,7 +148,7 @@ export function MinisitesView({
 
   // Listing state
   const [items, setItems] = useState<MinisiteItem[]>([]);
-  const [baseDomain, setBaseDomain] = useState('focoleads360.com.br');
+  const [publicBaseUrl, setPublicBaseUrl] = useState(() => getConfiguredPublicBaseUrl());
   const [loadingList, setLoadingList] = useState(true);
   const [listError, setListError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
@@ -162,7 +173,7 @@ export function MinisitesView({
       });
       const res = await apiFetch<MinisitesListResponse>(`/api/minisites?${qs.toString()}`);
       setItems(res.items);
-      setBaseDomain(res.baseDomain || 'focoleads360.com.br');
+      if (res.publicBaseUrl) setPublicBaseUrl(res.publicBaseUrl);
       setTotalPages(res.pagination.totalPages);
     } catch (err) {
       setListError(err instanceof Error ? err.message : 'Erro ao listar minisites.');
@@ -175,7 +186,7 @@ export function MinisitesView({
     loadMinisites();
   }, [loadMinisites]);
 
-  const applyCandidate = (place: GooglePlaceCandidate) => {
+  const applyCandidate = async (place: GooglePlaceCandidate) => {
     setSelectedPlace(place);
     setConfirmedName(place.name);
     setConfirmedCategory(place.category);
@@ -186,6 +197,36 @@ export function MinisitesView({
     setConfirmedWebsite(place.website);
     if (place.description && !description.trim()) {
       setDescription(place.description);
+    }
+
+    if (place.placeId) {
+      const initialPreviewUrls = (place.photos || [])
+        .slice(0, 4)
+        .map(
+          (_p, idx) =>
+            `/api/google/place-photo?placeId=${encodeURIComponent(place.placeId)}&idx=${idx}&w=960`
+        );
+      void preloadImageBatch(initialPreviewUrls, 2);
+
+      try {
+        const detailed = await apiFetch<{ place: GooglePlaceCandidate }>(
+          `/api/google/place-details/${encodeURIComponent(place.placeId)}`
+        );
+        if (detailed?.place) {
+          setSelectedPlace(detailed.place);
+          if (detailed.place.description && !description.trim()) {
+            setDescription(detailed.place.description);
+          }
+          if (detailed.place.phone) setConfirmedPhone(detailed.place.phone);
+          if (detailed.place.whatsappCandidate) setConfirmedWhatsapp(detailed.place.whatsappCandidate);
+          if (detailed.place.website) setConfirmedWebsite(detailed.place.website);
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : '';
+        if (msg && !msg.includes('não configurada')) {
+          setPlacesWarning(msg);
+        }
+      }
     }
   };
 
@@ -281,6 +322,8 @@ export function MinisitesView({
                 directionsUri: selectedPlace.directionsUri,
                 reviewsUri: selectedPlace.reviewsUri,
                 writeReviewUri: selectedPlace.writeReviewUri,
+                photosUri: selectedPlace.photosUri,
+                googleMapsUri: selectedPlace.googleMapsUri,
                 location: selectedPlace.location,
                 reviews: selectedPlace.reviews,
                 photos: selectedPlace.photos.map((p) => ({
@@ -296,6 +339,9 @@ export function MinisitesView({
         }),
       });
 
+      if (!res?.minisite?.id || !res?.minisite?.slug) {
+        throw new Error('O servidor não retornou o minisite criado com endereço (slug) válido.');
+      }
       setLastCreatedSlug(res.minisite.slug);
       setFormSuccess(
         `Minisite "${res.minisite.title}" criado (${res.aiUsed ? 'estruturado com IA' : 'estrutura inicial'}).`
@@ -308,8 +354,11 @@ export function MinisitesView({
     }
   };
 
-  const handleCopyAddress = (slug: string) => {
-    const shareUrl = `${window.location.origin}/demo/${slug}`;
+  const handleCopyAddress = (slug: string, status?: string) => {
+    const shareUrl =
+      status === 'publicado'
+        ? buildPublicMinisiteUrl(slug, { publicBaseUrl })
+        : `${window.location.origin}/demo/${slug}`;
     navigator.clipboard.writeText(shareUrl);
     setCopiedSlug(slug);
     setTimeout(() => setCopiedSlug(null), 2000);
@@ -372,15 +421,6 @@ export function MinisitesView({
       >
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
           <h2 className="text-base font-semibold text-[#10253D]">Novo minisite com IA</h2>
-          {isDemoSession && (
-            <button
-              type="button"
-              onClick={signInWithGoogle}
-              className="text-xs font-semibold text-[#1677F2] hover:underline text-left cursor-pointer"
-            >
-              Entre com Google para habilitar criação real
-            </button>
-          )}
         </div>
 
         {/* Primary Input + Buscar */}
@@ -461,13 +501,19 @@ export function MinisitesView({
                       >
                         {firstPhoto ? (
                           <div className="w-16 shrink-0">
-                            <img
-                              src={`/api/google/place-photo?name=${encodeURIComponent(
-                                firstPhoto.photoName
-                              )}&w=240`}
+                            <ResilientImage
+                              src={`/api/google/place-photo?placeId=${encodeURIComponent(
+                                cand.placeId
+                              )}&idx=0&w=960`}
                               alt={cand.name}
+                              variant="thumb"
                               referrerPolicy="no-referrer"
                               className="w-16 h-16 rounded-lg object-cover border border-slate-200"
+                              fallback={
+                                <div className="w-16 h-16 rounded-lg bg-slate-100 border border-slate-200 flex items-center justify-center text-xs font-bold text-slate-500 shrink-0">
+                                  {cand.name.slice(0, 2).toUpperCase()}
+                                </div>
+                              }
                             />
                           </div>
                         ) : (
@@ -607,16 +653,26 @@ export function MinisitesView({
                     {selectedPlace.description}
                   </p>
                 )}
-                {selectedPlace.photos.length > 1 && (
+                {selectedPlace.photos.length > 0 && (
                   <div className="flex gap-2 overflow-x-auto pb-1">
-                    {selectedPlace.photos.slice(0, 6).map((ph, idx) => (
-                      <img
-                        key={ph.photoName}
-                        src={`/api/google/place-photo?name=${encodeURIComponent(ph.photoName)}&w=240`}
-                        alt={`${selectedPlace.name} ${idx + 1}`}
-                        referrerPolicy="no-referrer"
-                        className="w-16 h-12 rounded-lg object-cover border border-slate-200 shrink-0"
-                      />
+                    {selectedPlace.photos.slice(0, 8).map((ph, idx) => (
+                      <div key={ph.photoName || idx} className="shrink-0 w-20">
+                        <ResilientImage
+                          src={`/api/google/place-photo?placeId=${encodeURIComponent(
+                            selectedPlace.placeId
+                          )}&idx=${idx}&w=960`}
+                          alt={`${selectedPlace.name} ${idx + 1}`}
+                          variant="thumb"
+                          loading="lazy"
+                          referrerPolicy="no-referrer"
+                          className="w-20 h-14 rounded-lg object-cover border border-slate-200"
+                        />
+                        {ph.authorAttributions?.[0]?.displayName && (
+                          <div className="text-[9px] text-slate-500 truncate mt-0.5">
+                            {ph.authorAttributions[0].displayName}
+                          </div>
+                        )}
+                      </div>
                     ))}
                   </div>
                 )}
@@ -744,7 +800,15 @@ export function MinisitesView({
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
           {items.map((item) => {
-            const fullSubdomain = `${item.slug}.${baseDomain}`;
+            if (!item) return null;
+            const itemSlug = item.slug || '';
+            const canonicalPath = itemSlug ? buildPublicMinisitePath(itemSlug) : '';
+            const publicUrl = itemSlug
+              ? buildPublicMinisiteUrl(itemSlug, {
+                  publicBaseUrl,
+                })
+              : '';
+            const isPublished = item.status === 'publicado';
             const updatedStr = new Date(item.updatedAt).toLocaleDateString('pt-BR', {
               day: '2-digit',
               month: 'short',
@@ -760,11 +824,20 @@ export function MinisitesView({
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex items-center gap-3 min-w-0">
                       {item.theme?.logoImage ? (
-                        <img
+                        <ResilientImage
                           src={item.theme.logoImage}
                           alt={item.title}
+                          variant="avatar"
                           referrerPolicy="no-referrer"
                           className="w-11 h-11 rounded-lg object-cover border border-slate-200 shrink-0"
+                          fallback={
+                            <div
+                              className="w-11 h-11 rounded-lg flex items-center justify-center text-white font-bold text-sm shrink-0"
+                              style={{ backgroundColor: item.theme?.primaryColor || '#10253D' }}
+                            >
+                              {item.title.slice(0, 2).toUpperCase()}
+                            </div>
+                          }
                         />
                       ) : (
                         <div
@@ -786,7 +859,19 @@ export function MinisitesView({
                   </div>
 
                   <div className="mt-4 pt-3 border-t border-slate-100 space-y-1.5">
-                    <div className="text-xs font-mono text-[#1677F2] truncate">{fullSubdomain}</div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span
+                        title={publicUrl}
+                        className="text-xs font-mono text-[#1677F2] truncate"
+                      >
+                        {canonicalPath}
+                      </span>
+                      {item.hasUnpublishedChanges && (
+                        <span className="text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded">
+                          Alterações pendentes
+                        </span>
+                      )}
+                    </div>
                     <div className="flex items-center gap-2 text-xs text-slate-500">
                       <span className="tabular-nums font-medium text-slate-700">
                         {item.viewsCount} visualizações
@@ -808,21 +893,34 @@ export function MinisitesView({
                       <span>Editar</span>
                     </button>
 
-                    <button
-                      type="button"
-                      onClick={() => onNavigate(`/demo/${item.slug}`)}
-                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-xs font-medium text-[#10253D] cursor-pointer"
-                    >
-                      <ExternalLink className="w-3.5 h-3.5" />
-                      <span>Abrir</span>
-                    </button>
+                    {isPublished ? (
+                      <a
+                        href={canonicalPath}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title={`Abrir prévia local em ${window.location.origin}${canonicalPath}`}
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-xs font-semibold text-emerald-800"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5" />
+                        <span>Abrir site</span>
+                      </a>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => itemSlug && onNavigate(`/demo/${itemSlug}`)}
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-xs font-medium text-[#10253D] cursor-pointer"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5" />
+                        <span>Prévia</span>
+                      </button>
+                    )}
 
                     <button
                       type="button"
-                      onClick={() => handleCopyAddress(item.slug)}
+                      onClick={() => itemSlug && handleCopyAddress(itemSlug, item.status)}
                       className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-xs font-medium text-[#10253D] cursor-pointer"
                     >
-                      {copiedSlug === item.slug ? (
+                      {copiedSlug === itemSlug ? (
                         <>
                           <Check className="w-3.5 h-3.5 text-emerald-600" />
                           <span>Copiado</span>
@@ -830,7 +928,7 @@ export function MinisitesView({
                       ) : (
                         <>
                           <Copy className="w-3.5 h-3.5" />
-                          <span>Copiar</span>
+                          <span>Copiar link</span>
                         </>
                       )}
                     </button>
@@ -845,7 +943,7 @@ export function MinisitesView({
                     >
                       <option value="rascunho">Rascunho</option>
                       <option value="demonstracao">Demonstração</option>
-                      <option value="publicado">Publicado (Admin)</option>
+                      <option value="publicado">Publicado ({canonicalPath})</option>
                       <option value="desativado">Desativado</option>
                     </select>
                     <button

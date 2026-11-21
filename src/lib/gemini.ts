@@ -250,22 +250,17 @@ export async function structureMinisiteWithGemini(params: {
   const systemInstruction = `Você é o motor de estruturação e identidade visual de minisites comerciais da Feed em Foco 360.
 REGRAS RÍGIDAS DE INTEGRIDADE:
 1. NUNCA invente preços, horários de funcionamento, avaliações, depoimentos, certificações, promoções, telefones ou endereços que não tenham sido fornecidos nos dados abaixo.
-2. Melhore a redação comercial apenas com base nas informações explicitamente fornecidas na ficha do Google e na descrição complementar.
-3. Para "services": extraia somente os serviços ou especialidades mencionados na descrição do Google, na descrição complementar, nas categorias/tipos ou nas avaliações reais enviadas. Se nenhum serviço específico for citado, retorne services vazio ([]) e inclua "servicos" em needsReviewFields.
-4. ANÁLISE DE IDENTIDADE VISUAL DA EMPRESA ("theme"):
-   - Se houver imagens anexadas (fachada, loja, ambiente ou logotipo), analise as cores predominantes da marca/fachada/letreiro/logotipo!
-   - "primaryColor": cor principal da marca/fachada para os botões de ação, ícones e destaques (ex: terracota/laranja vibrante da fachada, azul da marca, verde esmeralda da clínica, etc.). Evite cores muito lavadas no primaryColor.
-   - "secondaryColor": cor secundária complementar para o selo de horário na capa e detalhes.
-   - "accentColor": cor de acento vibrante para as formas decorativas da capa.
-   - "backgroundColor": cor de fundo suave da página que harmonize com a identidade visual (ex: creme quente #FAF5ED, gelo suave #F4F7FB, menta leve #F1F8F5, ou grafite #18181B se estética noturna/barbearia).
-   - "surfaceColor": fundo limpo dos cards (#FFFFFF em temas claros ou #27272A em temas escuros).
-   - "serviceCardBg": tom bem suave derivado da primaryColor para os cards da grade de serviços (ex: pêssego/terracota bem claro #F5DDD0 quando primaryColor for terracota).
-   - "textColor" e "buttonTextColor": cores com alto contraste (>= 4.5:1) sobre o fundo e sobre o botão principal.
-   - "brandAnalysisSummary": frase curta (1 a 2 linhas em pt-BR) explicando quais cores foram identificadas na identidade visual da empresa e como foram aplicadas nos botões, cards e fundo.
-5. Para "hero.subtitle": escreva uma descrição curta comercial atraente (máximo 140 caracteres) fiel ao segmento e localização confirmados.
-6. Para "institutionalText": escreva um parágrafo claro de apresentação (2 a 4 linhas) baseado apenas na ficha Google e descrição informada.
-7. Escolha o templateId mais adequado entre: ${VALID_TEMPLATES.join(', ')}.
-8. Responda estritamente no JSON especificado.`;
+2. Melhore a redação comercial apenas com base nas informações explicitamente fornecidas na ficha do Google, nas avaliações reais e na descrição complementar.
+3. Para "hero.title": extraia o nome limpo da marca (sem palavras-chave genéricas de SEO em caixa alta no início, ex: "PET SHOP BANHO E TOSA NA TIJUCA – NOSSO PET FAVORITO" vira "Nosso Pet Favorito").
+4. Para "hero.subtitle": escreva uma descrição calorosa, direta e comercial (máximo 140 caracteres) fiel ao segmento e bairro/cidade confirmados.
+5. Para "sectionTitle": use um título natural e acolhedor para o segmento (ex: "O que fazemos pelo seu pet" para pet shop/banho e tosa, "Nossos cuidados" para clínica, "O que oferecemos" para comércio local).
+6. Para "services": extraia de 3 a 4 serviços ou frentes principais mencionados na ficha do Google, nas categorias/tipos, na descrição complementar ou nas avaliações reais enviadas. Cada item deve ter título curto ("Banho", "Tosa", etc.) e descrição natural de 1 a 2 linhas. Se nenhum serviço específico puder ser inferido com segurança, retorne [] e inclua "servicos" em needsReviewFields.
+7. Para "institutionalText": escreva um resumo direto e persuasivo de 1 a 2 frases destacando o que clientes mais elogiam nas avaliações reais e diferenciais confirmados da empresa.
+8. ANÁLISE DE IDENTIDADE VISUAL DA EMPRESA ("theme"):
+   - Se houver imagem anexada, extraia as cores predominantes da marca/fachada para primaryColor, secondaryColor, accentColor, backgroundColor, surfaceColor, serviceCardBg, textColor e buttonTextColor (contraste >= 4.5:1).
+   - "brandAnalysisSummary": 1 frase curta em pt-BR explicando a paleta aplicada.
+9. Escolha o templateId mais adequado entre: ${VALID_TEMPLATES.join(', ')}.
+10. Responda estritamente no JSON especificado.`;
 
   const prompt = `Dados confirmados da empresa:
 Nome: ${params.companyNameOrQuery || 'Não informado'}
@@ -303,10 +298,10 @@ Analise a identidade visual da empresa (especialmente pelas imagens enviadas, se
   const response = await generateContentWithResilience({
     ai,
     contents: contentParts,
+    models: ['gemini-3.1-flash-lite', 'gemini-4-hydrogen'],
     config: {
       systemInstruction,
       responseMimeType: 'application/json',
-      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
       responseSchema: {
         type: Type.OBJECT,
         properties: {

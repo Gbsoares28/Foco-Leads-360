@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Calendar,
   Check,
   Clock,
   Copy,
   ExternalLink,
+  Flame,
   Globe,
   Link2,
   MapPin,
@@ -18,6 +19,7 @@ import {
   Wifi,
 } from 'lucide-react';
 import {
+  FONT_STYLE_OPTIONS,
   getRelativeLuminance,
   mixHexColors,
   pickReadableTextColor,
@@ -26,7 +28,10 @@ import {
   type MinisiteBlockData,
   type MinisiteTheme,
 } from '../lib/minisite-types';
+import { groupWeekdayHours } from '../lib/minisite-builder';
+import { preloadImageBatch } from '../lib/image-cache';
 import { PlaceMap } from './PlaceMap';
+import { ResilientImage } from './ResilientImage';
 import {
   FacebookLogo,
   InstagramLogo,
@@ -43,6 +48,11 @@ export interface RenderableMinisite {
   status?: string;
   templateId?: string;
   theme: MinisiteTheme;
+  seo?: {
+    title?: string;
+    description?: string;
+    noIndex?: boolean;
+  };
   business: {
     name?: string;
     category?: string;
@@ -80,23 +90,22 @@ function renderLinkIcon(iconName?: string) {
 }
 
 function getButtonRadiusClass(radius?: string) {
-  if (radius === 'md') return 'rounded-xl';
+  if (radius === 'md') return 'rounded-lg';
   if (radius === 'xl') return 'rounded-2xl';
   return 'rounded-full';
+}
+
+function getResolvedFontStack(fontFamily?: string) {
+  if (!fontFamily) return undefined;
+  const found = FONT_STYLE_OPTIONS.find(
+    (f) => f.id.toLowerCase() === fontFamily.toLowerCase() || f.label.toLowerCase() === fontFamily.toLowerCase()
+  );
+  return found ? found.cssValue : `'${fontFamily}', sans-serif`;
 }
 
 function isDarkHex(hex?: string): boolean {
   if (!hex || !/^#[0-9a-fA-F]{6}$/.test(hex)) return false;
   return getRelativeLuminance(hex) < 0.35;
-}
-
-function parseWeekdayRow(line: string): { day: string; hours: string } {
-  const idx = line.indexOf(':');
-  if (idx === -1) return { day: line.trim(), hours: '' };
-  return {
-    day: line.slice(0, idx).trim(),
-    hours: line.slice(idx + 1).trim(),
-  };
 }
 
 export function MinisiteRenderer({
@@ -125,10 +134,20 @@ export function MinisiteRenderer({
       ? theme.serviceCardBg
       : mixHexColors(surfaceColor, primaryColor, darkTheme ? 0.16 : 0.14);
 
-  const inkBorder = darkTheme ? 'rgba(255,255,255,0.2)' : '#1E1B18';
+  const siteStyle = theme.siteStyle || 'vibrante';
+  const isClassicOrShowcase = siteStyle === 'classico' || siteStyle === 'vitrine';
+  const inkBorder = darkTheme
+    ? siteStyle === 'luxo'
+      ? `${primaryColor}55`
+      : 'rgba(255,255,255,0.2)'
+    : isClassicOrShowcase
+      ? 'rgba(15,23,42,0.12)'
+      : '#1E1B18';
   const tactileShadow = darkTheme
     ? '0 4px 14px rgba(0,0,0,0.45)'
-    : '3px 3px 0 #1E1B18';
+    : isClassicOrShowcase
+      ? '0 2px 10px rgba(15,23,42,0.06)'
+      : '3px 3px 0 #1E1B18';
 
   const cardStyle: React.CSSProperties = {
     backgroundColor: surfaceColor,
@@ -144,11 +163,21 @@ export function MinisiteRenderer({
     if (theme.buttonStyle === 'outline') {
       return {
         backgroundColor: surfaceColor,
-        borderColor: inkBorder,
+        borderColor: overrideBg || primaryColor,
         borderWidth: '1.5px',
         borderStyle: 'solid',
         color: bg,
         boxShadow: tactileShadow,
+      };
+    }
+    if (theme.buttonStyle === 'soft' && !overrideBg) {
+      return {
+        backgroundColor: mixHexColors(surfaceColor, primaryColor, darkTheme ? 0.25 : 0.16),
+        borderColor: mixHexColors(surfaceColor, primaryColor, 0.35),
+        borderWidth: '1.5px',
+        borderStyle: 'solid',
+        color: darkTheme ? '#F8FAFC' : primaryColor,
+        boxShadow: 'none',
       };
     }
     if (theme.buttonStyle === 'gradient' && !overrideBg) {
@@ -182,14 +211,25 @@ export function MinisiteRenderer({
     coverBlock?.content?.subtitle || minisite.business?.category || ''
   );
 
+  useEffect(() => {
+    const galleryBlock = minisite.blocks.find((b) => b.blockType === 'galeria' && b.visible);
+    const galleryUrls = Array.isArray(galleryBlock?.content?.images)
+      ? (galleryBlock.content.images as GalleryPhotoItem[]).map((g) => g.url)
+      : [];
+    void preloadImageBatch([coverImage, logoImage, ...galleryUrls], 3);
+  }, [coverImage, logoImage, minisite.blocks]);
+
   const whatsappBlock = minisite.blocks.find((b) => b.blockType === 'whatsapp' && b.visible);
   const rawWhatsappDigits = String(
-    whatsappBlock?.content?.phone || minisite.business?.whatsapp || minisite.business?.phone || ''
+    minisite.business?.whatsapp || whatsappBlock?.content?.phone || minisite.business?.phone || ''
   ).replace(/\D/g, '');
+  const whatsappDefaultMessage = String(
+    theme.whatsappDefaultMessage ||
+      whatsappBlock?.content?.message ||
+      `Olá! Vim pelo minisite de ${heroTitle}.`
+  );
   const whatsappHref = rawWhatsappDigits
-    ? `https://wa.me/${rawWhatsappDigits}?text=${encodeURIComponent(
-        String(whatsappBlock?.content?.message || `Olá! Vim pelo minisite de ${heroTitle}.`)
-      )}`
+    ? `https://wa.me/${rawWhatsappDigits}?text=${encodeURIComponent(whatsappDefaultMessage)}`
     : null;
 
   const handleCopy = (id: string, value: string) => {
@@ -221,20 +261,35 @@ export function MinisiteRenderer({
     }
   }
 
+  const hasHeroMedia = Boolean(coverVideo || coverImage);
+  const heroBgColor =
+    theme.heroStyle === 'minimal' && !hasHeroMedia ? surfaceColor : primaryColor;
+  const heroInkColor = hasHeroMedia
+    ? '#FFFFFF'
+    : pickReadableTextColor(heroBgColor);
+  const heroSubInkColor =
+    heroInkColor === '#FFFFFF' ? 'rgba(255,255,255,0.92)' : mutedTextColor;
+
   return (
     <div
       className="relative flex flex-col min-h-full"
       style={{
         backgroundColor,
         color: textColor,
-        fontFamily: theme.fontFamily ? `'${theme.fontFamily}', sans-serif` : undefined,
+        fontFamily: getResolvedFontStack(theme.fontFamily),
       }}
     >
-      {/* Hero / Cover Card */}
+      {/* Unified Hero Cover Card with Upper-Left Logo, Name & Description */}
       <div className={compact ? 'p-3 pb-1' : 'p-4 pb-2'}>
         <div
-          className="relative rounded-3xl overflow-hidden text-white min-h-[245px] flex flex-col justify-between p-5"
-          style={{ backgroundColor: primaryColor }}
+          className={`relative rounded-3xl overflow-hidden border flex flex-col justify-between ${
+            hasHeroMedia ? 'min-h-[245px]' : 'min-h-[168px]'
+          } ${compact ? 'p-4' : 'p-5'}`}
+          style={{
+            borderColor: inkBorder,
+            backgroundColor: heroBgColor,
+            boxShadow: tactileShadow,
+          }}
         >
           {coverVideo ? (
             <video
@@ -246,78 +301,77 @@ export function MinisiteRenderer({
               className="absolute inset-0 w-full h-full object-cover"
             />
           ) : coverImage ? (
-            <img
+            <ResilientImage
               src={coverImage}
               alt={heroTitle}
+              variant="cover"
+              fallbackLabel="Imagem indisponível"
               referrerPolicy="no-referrer"
               className="absolute inset-0 w-full h-full object-cover"
             />
           ) : null}
 
-          {/* Warm Brand Gradient Overlay */}
-          <div
-            className="absolute inset-0"
-            style={{
-              background:
-                coverImage || coverVideo
-                  ? `linear-gradient(155deg, ${primaryColor}CC 0%, ${primaryColor}99 55%, rgba(16,37,61,0.85) 100%)`
-                  : `linear-gradient(135deg, ${primaryColor} 0%, ${secondaryColor} 100%)`,
-            }}
-          />
-
-          {/* Decorative playful brand circles */}
-          {theme.heroStyle !== 'minimal' && (
-            <>
-              <div
-                className="absolute -top-8 -right-8 w-32 h-32 rounded-full opacity-90 pointer-events-none"
-                style={{ backgroundColor: accentColor }}
-              />
-              <div
-                className="absolute -bottom-10 -left-8 w-24 h-24 rounded-full opacity-85 pointer-events-none"
-                style={{ backgroundColor: secondaryColor }}
-              />
-            </>
+          {hasHeroMedia && (
+            <div
+              className="absolute inset-0 pointer-events-none"
+              style={{
+                background: `linear-gradient(180deg, ${primaryColor}9E 0%, ${primaryColor}CC 52%, ${primaryColor}EB 100%)`,
+              }}
+            />
           )}
 
-          {/* Top Bar: Open badge */}
-          <div className="relative z-10 flex items-center justify-between gap-2 flex-wrap">
-            {theme.showOpenBadge && theme.openBadgeText ? (
+          <div className="relative z-10 flex flex-col items-start gap-2.5">
+            {theme.showOpenBadge && theme.openBadgeText && (
               <span
-                className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-bold shadow-sm"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold shadow-xs"
                 style={{
                   backgroundColor: secondaryColor,
                   color: pickReadableTextColor(secondaryColor),
                 }}
               >
-                <Clock className="w-3 h-3" />
+                {/aberto/i.test(theme.openBadgeText) ? (
+                  <Flame className="w-3 h-3 shrink-0" />
+                ) : (
+                  <Clock className="w-3 h-3 shrink-0" />
+                )}
                 <span>{theme.openBadgeText}</span>
               </span>
-            ) : (
-              <span />
             )}
-          </div>
 
-          {/* Logo + Title + Short Description */}
-          <div className="relative z-10 mt-4 space-y-2.5">
-            {logoImage ? (
-              <img
+            {logoImage && (
+              <ResilientImage
                 src={logoImage}
                 alt={heroTitle}
+                variant="avatar"
                 referrerPolicy="no-referrer"
-                className="w-14 h-14 rounded-2xl object-cover border-2 border-white bg-white shadow-sm"
+                className="w-14 h-14 rounded-xl object-cover border-2 border-white shrink-0 bg-white shadow-sm"
+                fallback={
+                  <div
+                    className="w-14 h-14 rounded-xl border-2 border-white shrink-0 flex items-center justify-center text-base font-extrabold shadow-sm"
+                    style={{
+                      backgroundColor: surfaceColor,
+                      color: primaryColor,
+                    }}
+                  >
+                    {heroTitle.slice(0, 2).toUpperCase()}
+                  </div>
+                }
               />
-            ) : (
-              <div className="w-12 h-12 rounded-2xl border border-white/50 bg-white/15 backdrop-blur-sm flex items-center justify-center font-bold text-base text-white">
-                {heroTitle.slice(0, 2).toUpperCase()}
-              </div>
             )}
 
-            <div>
-              <h1 className="text-xl sm:text-2xl font-extrabold leading-tight tracking-tight text-white drop-shadow-sm">
+            <div className="space-y-1.5 w-full">
+              <h1
+                className="text-2xl sm:text-[26px] font-extrabold leading-tight tracking-tight"
+                style={{ color: heroInkColor }}
+              >
                 {heroTitle}
               </h1>
+
               {heroSubtitle && (
-                <p className="mt-1.5 text-xs sm:text-[13px] text-white/95 leading-relaxed">
+                <p
+                  className="text-xs sm:text-[13px] leading-relaxed"
+                  style={{ color: heroSubInkColor }}
+                >
                   {heroSubtitle}
                 </p>
               )}
@@ -336,8 +390,16 @@ export function MinisiteRenderer({
       >
         {chunks.map((chunk, chunkIdx) => {
           if (chunk.kind === 'service_grid') {
+            const isCarousel = theme.servicesLayout === 'carousel';
             return (
-              <div key={`svc-grid-${chunkIdx}`} className="grid grid-cols-2 gap-3 pt-0.5">
+              <div
+                key={`svc-grid-${chunkIdx}`}
+                className={
+                  isCarousel
+                    ? 'flex gap-3 overflow-x-auto snap-x pb-1.5 pt-0.5'
+                    : 'grid grid-cols-2 gap-3 pt-0.5'
+                }
+              >
                 {chunk.items.map(({ block, idx }) => {
                   const c = block.content || {};
                   const key = block.id ?? block.clientKey ?? `svc-${idx}`;
@@ -348,7 +410,9 @@ export function MinisiteRenderer({
                   return (
                     <div
                       key={key}
-                      className="rounded-2xl p-3.5 flex flex-col justify-between gap-2.5"
+                      className={`rounded-2xl p-3.5 flex flex-col justify-between gap-2.5 ${
+                        isCarousel ? 'w-[195px] shrink-0 snap-start' : ''
+                      }`}
                       style={{
                         backgroundColor: serviceCardBg,
                         borderColor: inkBorder,
@@ -359,12 +423,24 @@ export function MinisiteRenderer({
                     >
                       <div className="space-y-2">
                         {image ? (
-                          <img
+                          <ResilientImage
                             src={image}
                             alt={serviceName}
+                            variant="thumb"
                             referrerPolicy="no-referrer"
                             className="w-10 h-10 rounded-xl object-cover border"
                             style={{ borderColor: inkBorder }}
+                            fallback={
+                              <div
+                                className="w-9 h-9 rounded-xl flex items-center justify-center text-sm font-extrabold"
+                                style={{
+                                  backgroundColor: primaryColor,
+                                  color: buttonTextColor,
+                                }}
+                              >
+                                {initial}
+                              </div>
+                            }
                           />
                         ) : (
                           <div
@@ -633,7 +709,10 @@ export function MinisiteRenderer({
           if (block.blockType === 'avaliacoes') {
             const rating = typeof c.rating === 'number' ? c.rating : null;
             const userRatingCount = typeof c.userRatingCount === 'number' ? c.userRatingCount : null;
-            const reviewsUri = String(c.reviewsUri || '');
+            const reviewsUri = String(
+              c.reviewsUri || minisite.business?.googleMapsUrl || ''
+            );
+            const writeReviewUri = String(c.writeReviewUri || '');
             const reviews = Array.isArray(c.reviews) ? (c.reviews as GoogleReviewItem[]) : [];
 
             return (
@@ -647,30 +726,32 @@ export function MinisiteRenderer({
                       {String(c.title || 'Quem conhece recomenda')}
                     </h3>
                     {rating != null && (
-                      <div className="flex items-center gap-1.5 mt-0.5 text-xs">
+                      <div className="flex items-center flex-wrap gap-1.5 mt-0.5 text-xs">
                         <Star className="w-3.5 h-3.5 text-amber-500 fill-amber-500" />
                         <span className="font-bold tabular-nums">{rating.toFixed(1)}</span>
                         <span style={{ color: mutedTextColor }}>
-                          ({userRatingCount ?? 0} avaliações no Google)
+                          ({userRatingCount ?? 0} avaliações · Fonte: Google)
                         </span>
                       </div>
                     )}
                   </div>
-                  {reviewsUri && (
-                    <a
-                      href={reviewsUri}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-[11px] font-bold inline-flex items-center gap-1 hover:underline shrink-0"
-                      style={{ color: primaryColor }}
-                    >
-                      <span>Ver todas</span>
-                      <ExternalLink className="w-3 h-3" />
-                    </a>
-                  )}
+                  <div className="flex items-center gap-2 shrink-0">
+                    {reviewsUri && (
+                      <a
+                        href={reviewsUri}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-[11px] font-bold inline-flex items-center gap-1 hover:underline"
+                        style={{ color: primaryColor }}
+                      >
+                        <span>Ver no Google</span>
+                        <ExternalLink className="w-3 h-3" />
+                      </a>
+                    )}
+                  </div>
                 </div>
 
-                {reviews.length > 0 && (
+                {reviews.length > 0 ? (
                   <div className="flex gap-3 overflow-x-auto snap-x pb-2 -mx-1 px-1">
                     {reviews.slice(0, 5).map((rev, rIdx) => {
                       const authorInitial = (rev.authorName || 'C').trim().charAt(0).toUpperCase();
@@ -678,46 +759,127 @@ export function MinisiteRenderer({
                       return (
                         <div
                           key={rIdx}
-                          className="min-w-[235px] max-w-[260px] shrink-0 snap-start rounded-2xl p-4 flex flex-col justify-between gap-3"
+                          className="min-w-[240px] max-w-[270px] shrink-0 snap-start rounded-2xl p-4 flex flex-col justify-between gap-3"
                           style={cardStyle}
                         >
                           <div className="space-y-2">
-                            <div className="flex items-center gap-0.5">
-                              {Array.from({ length: starCount }).map((_, sIdx) => (
-                                <Star
-                                  key={sIdx}
-                                  className="w-3.5 h-3.5 text-amber-500 fill-amber-500"
-                                />
-                              ))}
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-0.5">
+                                {Array.from({ length: starCount }).map((_, sIdx) => (
+                                  <Star
+                                    key={sIdx}
+                                    className="w-3.5 h-3.5 text-amber-500 fill-amber-500"
+                                  />
+                                ))}
+                              </div>
+                              {rev.relativeTime && (
+                                <span
+                                  className="text-[10px] truncate"
+                                  style={{ color: mutedTextColor }}
+                                >
+                                  {rev.relativeTime}
+                                </span>
+                              )}
                             </div>
-                            <p
-                              className="text-xs leading-relaxed line-clamp-4"
-                              style={{ color: textColor }}
-                            >
-                              “{rev.text}”
-                            </p>
+                            {rev.text ? (
+                              <p
+                                className="text-xs leading-relaxed line-clamp-4"
+                                style={{ color: textColor }}
+                              >
+                                “{rev.text}”
+                              </p>
+                            ) : (
+                              <p className="text-[11px] italic" style={{ color: mutedTextColor }}>
+                                Avaliação com {starCount} estrelas no Google Maps.
+                              </p>
+                            )}
                           </div>
 
-                          <div className="flex items-center gap-2 pt-1">
-                            <span
-                              className="w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0"
-                              style={{
-                                backgroundColor: primaryColor,
-                                color: buttonTextColor,
-                              }}
-                            >
-                              {authorInitial}
-                            </span>
-                            <span
-                              className="text-xs font-bold truncate"
-                              style={{ color: textColor }}
-                            >
-                              {rev.authorName}
-                            </span>
+                          <div className="flex items-center justify-between gap-2 pt-1">
+                            <div className="flex items-center gap-2 min-w-0">
+                              {rev.authorPhotoUri ? (
+                                <ResilientImage
+                                  src={rev.authorPhotoUri}
+                                  alt={rev.authorName}
+                                  variant="avatar"
+                                  referrerPolicy="no-referrer"
+                                  className="w-6 h-6 rounded-full object-cover shrink-0 border"
+                                  style={{ borderColor: inkBorder }}
+                                  fallback={
+                                    <span
+                                      className="w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0"
+                                      style={{
+                                        backgroundColor: primaryColor,
+                                        color: buttonTextColor,
+                                      }}
+                                    >
+                                      {authorInitial}
+                                    </span>
+                                  }
+                                />
+                              ) : (
+                                <span
+                                  className="w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0"
+                                  style={{
+                                    backgroundColor: primaryColor,
+                                    color: buttonTextColor,
+                                  }}
+                                >
+                                  {authorInitial}
+                                </span>
+                              )}
+                              {rev.authorUri ? (
+                                <a
+                                  href={rev.authorUri}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-xs font-bold truncate hover:underline"
+                                  style={{ color: textColor }}
+                                >
+                                  {rev.authorName}
+                                </a>
+                              ) : (
+                                <span
+                                  className="text-xs font-bold truncate"
+                                  style={{ color: textColor }}
+                                >
+                                  {rev.authorName}
+                                </span>
+                              )}
+                            </div>
+                            {(rev.reviewUri || reviewsUri) && (
+                              <a
+                                href={rev.reviewUri || reviewsUri}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                title="Abrir avaliação original no Google"
+                                className="text-[10px] font-semibold shrink-0 hover:underline"
+                                style={{ color: primaryColor }}
+                              >
+                                Google
+                              </a>
+                            )}
                           </div>
                         </div>
                       );
                     })}
+                  </div>
+                ) : (
+                  <div className="rounded-2xl p-3.5 text-xs flex items-center justify-between gap-2" style={cardStyle}>
+                    <span style={{ color: mutedTextColor }}>
+                      Confira os comentários e avaliações completos diretamente no Google.
+                    </span>
+                    {(writeReviewUri || reviewsUri) && (
+                      <a
+                        href={reviewsUri || writeReviewUri}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="font-bold shrink-0 hover:underline"
+                        style={{ color: primaryColor }}
+                      >
+                        Abrir ficha
+                      </a>
+                    )}
                   </div>
                 )}
               </div>
@@ -727,34 +889,27 @@ export function MinisiteRenderer({
           if (block.blockType === 'galeria') {
             const images = Array.isArray(c.images) ? (c.images as GalleryPhotoItem[]) : [];
             if (images.length === 0) return null;
-            const hasGoogleAttribution = images.some(
-              (img) =>
-                img.url?.includes('/api/google/place-photo') ||
-                (img.attributionName && img.attributionName.toLowerCase().includes('google'))
-            );
             return (
               <div key={key} className="space-y-1.5 pt-1">
                 <div className="flex gap-2.5 overflow-x-auto snap-x pb-1">
                   {images.map((img, gIdx) => (
-                    <div
-                      key={gIdx}
-                      className="relative w-[205px] sm:w-[230px] aspect-[16/10] shrink-0 snap-start rounded-2xl overflow-hidden border"
-                      style={{ borderColor: inkBorder }}
-                    >
-                      <img
-                        src={img.url}
-                        alt={img.caption || `${heroTitle} foto ${gIdx + 1}`}
-                        referrerPolicy="no-referrer"
-                        className="w-full h-full object-cover"
-                      />
+                    <div key={gIdx} className="w-[205px] sm:w-[230px] shrink-0 snap-start flex flex-col gap-1.5">
+                      <div
+                        className="w-full aspect-[16/10] rounded-2xl overflow-hidden border"
+                        style={{ borderColor: inkBorder }}
+                      >
+                        <ResilientImage
+                          src={img.url}
+                          alt={img.caption || `${heroTitle} foto ${gIdx + 1}`}
+                          variant="gallery"
+                          fallbackLabel="Imagem indisponível"
+                          referrerPolicy="no-referrer"
+                          className="w-full h-full object-cover"
+                        />
+                      </div>
                     </div>
                   ))}
                 </div>
-                {hasGoogleAttribution && (
-                  <div className="text-right text-[10px]" style={{ color: mutedTextColor }}>
-                    Fotos: Google
-                  </div>
-                )}
               </div>
             );
           }
@@ -764,16 +919,7 @@ export function MinisiteRenderer({
               ? (c.weekdayDescriptions as string[])
               : [];
             if (weekdays.length === 0) return null;
-            const todayNames = [
-              'domingo',
-              'segunda',
-              'terça',
-              'quarta',
-              'quinta',
-              'sexta',
-              'sábado',
-            ];
-            const todayKey = todayNames[new Date().getDay()];
+            const groupedRows = groupWeekdayHours(weekdays, new Date().getDay());
             return (
               <div key={key} className="rounded-2xl p-4 space-y-2.5" style={cardStyle}>
                 <div
@@ -784,33 +930,28 @@ export function MinisiteRenderer({
                   <span>{String(c.title || 'Horário de funcionamento')}</span>
                 </div>
                 <ul className="space-y-2 text-xs">
-                  {weekdays.map((line, i) => {
-                    const isToday = line.toLowerCase().startsWith(todayKey);
-                    const { day, hours } = parseWeekdayRow(line);
-                    const isClosed = hours.toLowerCase().includes('fechado');
-                    return (
-                      <li
-                        key={i}
-                        className="flex items-center justify-between gap-2 pb-1.5 border-b last:border-b-0 last:pb-0"
-                        style={{ borderColor: darkTheme ? 'rgba(255,255,255,0.1)' : 'rgba(15,23,42,0.08)' }}
+                  {groupedRows.map((row, i) => (
+                    <li
+                      key={i}
+                      className="flex items-center justify-between gap-2 pb-1.5 border-b last:border-b-0 last:pb-0"
+                      style={{ borderColor: darkTheme ? 'rgba(255,255,255,0.1)' : 'rgba(15,23,42,0.08)' }}
+                    >
+                      <span
+                        className={row.isToday ? 'font-bold' : 'font-medium'}
+                        style={{ color: textColor }}
                       >
+                        {row.label}
+                      </span>
+                      {row.hours && (
                         <span
-                          className={isToday ? 'font-bold' : 'font-medium'}
-                          style={{ color: textColor }}
+                          className="font-bold tabular-nums shrink-0"
+                          style={{ color: row.isClosed ? mutedTextColor : primaryColor }}
                         >
-                          {isToday ? `Hoje · ${day}` : day}
+                          {row.hours}
                         </span>
-                        {hours && (
-                          <span
-                            className="font-bold tabular-nums shrink-0"
-                            style={{ color: isClosed ? mutedTextColor : primaryColor }}
-                          >
-                            {hours}
-                          </span>
-                        )}
-                      </li>
-                    );
-                  })}
+                      )}
+                    </li>
+                  ))}
                 </ul>
               </div>
             );

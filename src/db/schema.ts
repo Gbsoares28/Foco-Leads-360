@@ -79,6 +79,8 @@ export const minisites = pgTable(
     templateId: text('template_id').notNull().default('modelo_generico'),
     theme: jsonb('theme').$type<Record<string, unknown>>().notNull().default({}),
     seo: jsonb('seo').$type<Record<string, unknown>>().notNull().default({}),
+    publishedSnapshot: jsonb('published_snapshot').$type<Record<string, unknown> | null>(),
+    publishedAt: timestamp('published_at'),
     viewsCount: integer('views_count').notNull().default(0),
     isDemo: boolean('is_demo').notNull().default(false),
     createdBy: integer('created_by').references(() => profiles.id, { onDelete: 'set null' }),
@@ -93,6 +95,22 @@ export const minisites = pgTable(
     index('idx_minisites_slug').on(table.slug),
     index('idx_minisites_status').on(table.status),
     index('idx_minisites_is_demo').on(table.isDemo),
+  ]
+);
+
+export const minisiteSlugAliases = pgTable(
+  'minisite_slug_aliases',
+  {
+    id: serial('id').primaryKey(),
+    minisiteId: integer('minisite_id')
+      .references(() => minisites.id, { onDelete: 'cascade' })
+      .notNull(),
+    aliasSlug: text('alias_slug').notNull().unique(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => [
+    index('idx_minisite_slug_aliases_alias_slug').on(table.aliasSlug),
+    index('idx_minisite_slug_aliases_minisite_id').on(table.minisiteId),
   ]
 );
 
@@ -303,6 +321,15 @@ export const auditLogs = pgTable(
   (table) => [index('idx_audit_logs_created_at').on(table.createdAt)]
 );
 
+export const mediaAssets = pgTable('media_assets', {
+  id: serial('id').primaryKey(),
+  filename: text('filename').notNull().unique(),
+  mimeType: text('mime_type').notNull(),
+  dataBase64: text('data_base64').notNull(),
+  sizeBytes: integer('size_bytes').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
 // Relations
 export const businessesRelations = relations(businesses, ({ many, one }) => ({
   minisites: many(minisites),
@@ -321,6 +348,14 @@ export const minisitesRelations = relations(minisites, ({ one, many }) => ({
   blocks: many(minisiteBlocks),
   versions: many(minisiteVersions),
   events: many(minisiteEvents),
+  slugAliases: many(minisiteSlugAliases),
+}));
+
+export const minisiteSlugAliasesRelations = relations(minisiteSlugAliases, ({ one }) => ({
+  minisite: one(minisites, {
+    fields: [minisiteSlugAliases.minisiteId],
+    references: [minisites.id],
+  }),
 }));
 
 export const minisiteBlocksRelations = relations(minisiteBlocks, ({ one }) => ({

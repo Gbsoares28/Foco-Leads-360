@@ -174,3 +174,213 @@ test('Independent social button blocks and URL normalizer support Instagram, Tik
     'https://www.instagram.com/feedemfoco360/'
   );
 });
+
+import {
+  ALLOWED_ADMIN_EMAIL,
+  isAuthorizedAdminEmail,
+  isAuthorizedFirebaseAccount,
+  validateAdminLoginAttempt,
+} from '../src/lib/auth-policy.ts';
+import {
+  ADMIN_SESSION_TOKEN_PREFIX,
+  AdminSessionTokenError,
+  issueAdminSessionToken,
+  verifyAdminCredentialsServer,
+  verifyAdminSessionToken,
+} from '../src/lib/admin-session.ts';
+import firebaseConfig from '../firebase-applet-config.json' with { type: 'json' };
+import crypto from 'node:crypto';
+import { optionalAuthOrDemo, requireAuth } from '../src/middleware/auth.ts';
+
+test('Auth policy allows only gabrieltreinadordeanimais@gmail.com with exact password 100130', () => {
+  assert.equal(ALLOWED_ADMIN_EMAIL, 'gabrieltreinadordeanimais@gmail.com');
+  assert.equal(isAuthorizedAdminEmail('  GabrielTreinadorDeAnimais@gmail.com '), true);
+  assert.equal(isAuthorizedAdminEmail('outro@gmail.com'), false);
+  assert.equal(isAuthorizedAdminEmail(''), false);
+
+  const valid = validateAdminLoginAttempt('  GabrielTreinadorDeAnimais@gmail.com ', '100130');
+  assert.equal(valid.ok, true);
+  if (valid.ok) {
+    assert.equal(valid.normalizedEmail, 'gabrieltreinadordeanimais@gmail.com');
+  }
+
+  const wrongEmail = validateAdminLoginAttempt('intruder@gmail.com', '100130');
+  assert.equal(wrongEmail.ok, false);
+  if (!wrongEmail.ok) {
+    assert.equal(wrongEmail.reason, 'email_not_allowed');
+  }
+
+  const wrongPassword = validateAdminLoginAttempt('gabrieltreinadordeanimais@gmail.com', '999999');
+  assert.equal(wrongPassword.ok, false);
+  if (!wrongPassword.ok) {
+    assert.equal(wrongPassword.reason, 'invalid_password');
+  }
+
+  const emptyInput = validateAdminLoginAttempt('', '');
+  assert.equal(emptyInput.ok, false);
+  if (!emptyInput.ok) {
+    assert.equal(emptyInput.reason, 'empty_fields');
+  }
+});
+
+test('Auth policy blocks Google OAuth and unauthorized Firebase providers even for the admin email', () => {
+  assert.equal(
+    isAuthorizedFirebaseAccount({
+      email: 'gabrieltreinadordeanimais@gmail.com',
+      signInProvider: 'password',
+      providerIds: ['password'],
+    }).allowed,
+    true
+  );
+
+  assert.equal(
+    isAuthorizedFirebaseAccount({
+      email: 'gabrieltreinadordeanimais@gmail.com',
+      signInProvider: 'google.com',
+      providerIds: ['google.com'],
+    }).allowed,
+    false
+  );
+
+  assert.equal(
+    isAuthorizedFirebaseAccount({
+      email: 'outro@gmail.com',
+      signInProvider: 'password',
+      providerIds: ['password'],
+    }).allowed,
+    false
+  );
+});
+
+test('Server admin session verification and signed tokens allow only authorized admin and reject tampering', () => {
+  const okCred = verifyAdminCredentialsServer('  GabrielTreinadorDeAnimais@gmail.com ', '100130');
+  assert.equal(okCred.ok, true);
+
+  const badEmail = verifyAdminCredentialsServer('outro@gmail.com', '100130');
+  assert.equal(badEmail.ok, false);
+
+  const badPass = verifyAdminCredentialsServer('gabrieltreinadordeanimais@gmail.com', '123456');
+  assert.equal(badPass.ok, false);
+
+  const token = issueAdminSessionToken(3600);
+  assert.ok(token.startsWith('admin-session.'));
+
+  const decoded = verifyAdminSessionToken(token);
+  assert.equal(decoded.email, 'gabrieltreinadordeanimais@gmail.com');
+  assert.equal(decoded.provider, 'password');
+
+  // Tamper signature
+  const tampered = `${token.slice(0, -4)}xxxx`;
+  assert.throws(() => verifyAdminSessionToken(tampered));
+
+  // Malformed prefix
+  assert.throws(() => verifyAdminSessionToken('Bearer fake.token'));
+});
+
+test('Backend auth middleware blocks unauthenticated requests, tampered admin-session tokens, and x-foco-demo-mode bypass', async () => {
+  const createMockRes = () => {
+    const out: { statusCode: number; body: unknown } = { statusCode: 200, body: null };
+    return {
+      out,
+      res: {
+        status(code: number) {
+          out.statusCode = code;
+          return this;
+        },
+        json(payload: unknown) {
+          out.body = payload;
+          return this;
+        },
+      },
+    };
+  };
+
+  let nextCalled = false;
+  const mock1 = createMockRes();
+  await requireAuth(
+    { headers: {} } as never,
+    mock1.res as never,
+    () => {
+      nextCalled = true;
+    }
+  );
+  assert.equal(nextCalled, false);
+  assert.equal(mock1.out.statusCode, 401);
+
+  const mock2 = createMockRes();
+  await optionalAuthOrDemo(
+    { headers: { 'x-foco-demo-mode': 'true' } } as never,
+    mock2.res as never,
+    () => {
+      nextCalled = true;
+    }
+  );
+  assert.equal(nextCalled, false);
+  assert.equal(mock2.out.statusCode, 401);
+
+  const validToken = issueAdminSessionToken(3600);
+  const tamperedToken = `${validToken.slice(0, -3)}abc`;
+  const mock3 = createMockRes();
+  await requireAuth(
+    { headers: { authorization: `Bearer ${tamperedToken}` } } as never,
+    mock3.res as never,
+    () => {
+      nextCalled = true;
+    }
+  );
+  assert.equal(nextCalled, false);
+  assert.equal(mock3.out.statusCode, 401);
+
+  // Build an expired admin session token signed with the active secret and ensure 401 SESSION_EXPIRED without console.error
+  const secret =
+    process.env.SESSION_SECRET?.trim() ||
+    process.env.AUTH_TOKEN_SECRET?.trim() ||
+    crypto
+      .createHash('sha256')
+      .update(`${firebaseConfig.projectId}:${firebaseConfig.apiKey}:foco-leads-360-admin-auth`)
+      .digest('hex');
+  const expiredPayloadB64 = Buffer.from(
+    JSON.stringify({
+      sub: 'admin-gabrieltreinadordeanimais',
+      email: 'gabrieltreinadordeanimais@gmail.com',
+      provider: 'password',
+      iat: Math.floor(Date.now() / 1000) - 7200,
+      exp: Math.floor(Date.now() / 1000) - 60,
+    }),
+    'utf8'
+  ).toString('base64url');
+  const expiredSigB64 = crypto
+    .createHmac('sha256', secret)
+    .update(expiredPayloadB64)
+    .digest('base64url');
+  const expiredToken = `${ADMIN_SESSION_TOKEN_PREFIX}${expiredPayloadB64}.${expiredSigB64}`;
+
+  assert.throws(
+    () => verifyAdminSessionToken(expiredToken),
+    (err: unknown) => err instanceof AdminSessionTokenError && err.code === 'expired'
+  );
+
+  const origConsoleError = console.error;
+  let errorLogCalls = 0;
+  console.error = () => {
+    errorLogCalls += 1;
+  };
+  try {
+    const mock4 = createMockRes();
+    await requireAuth(
+      { headers: { authorization: `Bearer ${expiredToken}` } } as never,
+      mock4.res as never,
+      () => {
+        nextCalled = true;
+      }
+    );
+    assert.equal(nextCalled, false);
+    assert.equal(mock4.out.statusCode, 401);
+    assert.equal((mock4.out.body as { code?: string }).code, 'SESSION_EXPIRED');
+    assert.equal(errorLogCalls, 0);
+  } finally {
+    console.error = origConsoleError;
+  }
+});
+
+

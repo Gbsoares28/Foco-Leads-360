@@ -280,7 +280,7 @@ export function DashboardView({ onNavigate }: { onNavigate: (path: string) => vo
                       </>
                     )}
                     <span aria-hidden="true">·</span>
-                    <span className="font-mono text-[11px]">{item.slug}</span>
+                    <span className="font-mono text-[11px]">{item?.slug || ''}</span>
                   </div>
                 </div>
 
@@ -291,10 +291,15 @@ export function DashboardView({ onNavigate }: { onNavigate: (path: string) => vo
                   </span>
                   <button
                     type="button"
-                    onClick={() => onNavigate(`/demo/${item.slug}`)}
+                    onClick={() =>
+                      item?.slug &&
+                      onNavigate(
+                        item.status === 'publicado' ? `/${item.slug}` : `/demo/${item.slug}`
+                      )
+                    }
                     className="inline-flex items-center gap-1 text-xs font-medium text-[#1677F2] hover:underline cursor-pointer"
                   >
-                    <span>Abrir</span>
+                    <span>{item.status === 'publicado' ? 'Abrir site' : 'Prévia'}</span>
                     <ExternalLink className="w-3.5 h-3.5" />
                   </button>
                 </div>

@@ -15,6 +15,7 @@ import { CrmPipelineView } from './views/CrmPipelineView';
 import { QrCodesView } from './views/QrCodesView';
 import { ScriptsView } from './views/ScriptsView';
 import { ConfiguracoesView } from './views/ConfiguracoesView';
+import { extractPublicMinisiteSlugFromPath } from './lib/slug-utils';
 
 const ROADMAP_MODULES: Record<
   string,
@@ -155,10 +156,10 @@ const ROADMAP_MODULES: Record<
     title: 'Configurações',
     phase: 3,
     description:
-      'Configuração de domínio wildcard para subdomínios, políticas de publicação e padrões da marca.',
+      'Configuração de publicação por caminho no mesmo domínio, padrões comerciais e notificações.',
     deliverables: [
-      'Definição de domínio base configurável (ex: focoleads360.com.br)',
-      'Reserva de subdomínios administrativos',
+      'Publicação direta em /:slug no mesmo domínio sem DNS individual',
+      'Reserva de rotas administrativas e operacionais',
     ],
   },
   '/integracoes': {
@@ -174,7 +175,7 @@ const ROADMAP_MODULES: Record<
 };
 
 function AppRouter() {
-  const { firebaseUser, profile, loading, isDemoSession } = useAuth();
+  const { profile, loading, isDemoSession } = useAuth();
   const [currentPath, setCurrentPath] = useState(() => window.location.pathname || '/');
 
   useEffect(() => {
@@ -199,6 +200,19 @@ function AppRouter() {
     return (
       <MinisitePublicPreview
         slug={demoMatch[1]}
+        mode="demo"
+        onBack={() => navigate('/minisites')}
+      />
+    );
+  }
+
+  // Published /:slug (canonical) or legacy /LinkFoco/:slug, /s/:slug minisite route (anonymous public access)
+  const publicSlug = extractPublicMinisiteSlugFromPath(currentPath);
+  if (publicSlug) {
+    return (
+      <MinisitePublicPreview
+        slug={publicSlug}
+        mode="public"
         onBack={() => navigate('/minisites')}
       />
     );
@@ -212,7 +226,7 @@ function AppRouter() {
     );
   }
 
-  const isAuthenticated = Boolean(firebaseUser && profile);
+  const isAuthenticated = Boolean(profile);
   if (!isAuthenticated && !isDemoSession) {
     return <LoginScreen />;
   }

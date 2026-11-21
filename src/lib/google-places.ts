@@ -8,6 +8,16 @@ export class GoogleMapsQuotaError extends Error {
   }
 }
 
+export class GooglePlacesApiError extends Error {
+  status: number;
+  code: string;
+  constructor(message: string, status = 502, code = 'GMP_API_ERROR') {
+    super(message);
+    this.status = status;
+    this.code = code;
+  }
+}
+
 export interface GooglePlacePhotoCandidate {
   photoName: string;
   widthPx?: number;
@@ -15,6 +25,7 @@ export interface GooglePlacePhotoCandidate {
   authorAttributions: Array<{
     displayName: string;
     uri?: string;
+    photoUri?: string;
   }>;
 }
 
@@ -38,6 +49,8 @@ export interface GooglePlaceCandidate {
   directionsUri: string;
   reviewsUri: string;
   writeReviewUri: string;
+  photosUri: string;
+  placeUri: string;
   rating: number | null;
   userRatingCount: number | null;
   reviews: GoogleReviewItem[];
@@ -76,11 +89,93 @@ const PLACES_FIELD_MASK = [
 
 const PLACE_DETAILS_FIELD_MASK = PLACES_FIELD_MASK.replace(/places\./g, '');
 
+const PLACE_CACHE_TTL_MS = 3 * 60 * 1000;
+const MAX_CACHED_PLACES = 60;
+const transientPlaceCache = new Map<string, { place: GooglePlaceCandidate; expiresAt: number }>();
+
+export function cacheGooglePlaceCandidate(place: GooglePlaceCandidate) {
+  const cleanId = String(place.placeId || '').replace(/^places\//, '').trim();
+  if (!cleanId) return;
+  if (transientPlaceCache.has(cleanId)) {
+    transientPlaceCache.delete(cleanId);
+  }
+  while (transientPlaceCache.size >= MAX_CACHED_PLACES) {
+    const oldest = transientPlaceCache.keys().next().value;
+    if (!oldest) break;
+    transientPlaceCache.delete(oldest);
+  }
+  transientPlaceCache.set(cleanId, {
+    place,
+    expiresAt: Date.now() + PLACE_CACHE_TTL_MS,
+  });
+}
+
+export function clearGooglePlaceCache(placeId?: string) {
+  if (placeId) {
+    const cleanId = String(placeId).replace(/^places\//, '').trim();
+    transientPlaceCache.delete(cleanId);
+    return;
+  }
+  transientPlaceCache.clear();
+}
+
 function getGoogleMapsApiKey(): string | null {
-  return (
+  const raw =
     process.env.GOOGLE_MAPS_API_KEY ||
     process.env.VITE_GOOGLE_MAPS_API_KEY ||
-    null
+    '';
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed === 'MY_GOOGLE_MAPS_API_KEY') {
+    return null;
+  }
+  return trimmed;
+}
+
+function normalizeGoogleUri(uri?: string): string | undefined {
+  if (!uri) return undefined;
+  const trimmed = uri.trim();
+  if (!trimmed) return undefined;
+  return trimmed.startsWith('//') ? `https:${trimmed}` : trimmed;
+}
+
+function formatPlacesHttpError(
+  status: number,
+  json: Record<string, unknown>,
+  rawText?: string
+): GooglePlacesApiError {
+  const errObj = json.error as { message?: string; status?: string } | undefined;
+  const apiStatus = errObj?.status || '';
+  const apiMessage = errObj?.message || rawText || `HTTP ${status}`;
+
+  if (status === 429 || apiStatus === 'RESOURCE_EXHAUSTED') {
+    console.error('[GooglePlaces 429/RESOURCE_EXHAUSTED]:', apiMessage);
+    throw new GoogleMapsQuotaError(
+      apiMessage && apiMessage !== 'HTTP 429'
+        ? `Cota da Google Places API atingida no momento (${apiMessage}).`
+        : 'Cota da Google Places API atingida no momento.'
+    );
+  }
+
+  if (status === 401 || status === 403 || apiStatus === 'PERMISSION_DENIED' || apiStatus === 'UNAUTHENTICATED') {
+    return new GooglePlacesApiError(
+      `Falha de permissão/chave na Google Places API (New): ${apiMessage}`,
+      status,
+      apiStatus || 'GMP_PERMISSION_DENIED'
+    );
+  }
+
+  if (status === 400 || status === 404 || apiStatus === 'INVALID_ARGUMENT' || apiStatus === 'NOT_FOUND') {
+    return new GooglePlacesApiError(
+      `Place ID ou parâmetro inválido na Google Places API: ${apiMessage}`,
+      status,
+      apiStatus || 'GMP_INVALID_REQUEST'
+    );
+  }
+
+  return new GooglePlacesApiError(
+    `Erro na Google Places API (${status}): ${apiMessage}`,
+    status >= 400 ? status : 502,
+    apiStatus || 'GMP_API_ERROR'
   );
 }
 
@@ -93,7 +188,7 @@ function extractBrazilianMobileWhatsapp(internationalPhone?: string): string {
   return '';
 }
 
-function mapRawPlace(place: Record<string, unknown>): GooglePlaceCandidate {
+export function mapRawPlace(place: Record<string, unknown>): GooglePlaceCandidate {
   const displayName = place.displayName as { text?: string } | undefined;
   const primaryTypeDisplay = place.primaryTypeDisplayName as { text?: string } | undefined;
   const editorialSummary = place.editorialSummary as { text?: string } | undefined;
@@ -101,7 +196,13 @@ function mapRawPlace(place: Record<string, unknown>): GooglePlaceCandidate {
     | { overview?: { text?: string }; description?: { text?: string } }
     | undefined;
   const googleMapsLinks = place.googleMapsLinks as
-    | { directionsUri?: string; reviewsUri?: string; writeAReviewUri?: string }
+    | {
+        directionsUri?: string;
+        reviewsUri?: string;
+        writeAReviewUri?: string;
+        photosUri?: string;
+        placeUri?: string;
+      }
     | undefined;
   const regularHours = place.regularOpeningHours as
     | { weekdayDescriptions?: string[]; openNow?: boolean }
@@ -133,12 +234,15 @@ function mapRawPlace(place: Record<string, unknown>): GooglePlaceCandidate {
     ? (place.photos as Array<Record<string, unknown>>)
     : [];
 
-  const photos: GooglePlacePhotoCandidate[] = rawPhotos.slice(0, 8).map((ph) => {
+  const photos: GooglePlacePhotoCandidate[] = rawPhotos.slice(0, 10).map((ph) => {
     const attrs = Array.isArray(ph.authorAttributions)
-      ? (ph.authorAttributions as Array<{ displayName?: string; uri?: string }>).map((a) => ({
-          displayName: a.displayName || 'Google Maps',
-          uri: a.uri ? (a.uri.startsWith('//') ? `https:${a.uri}` : a.uri) : undefined,
-        }))
+      ? (ph.authorAttributions as Array<{ displayName?: string; uri?: string; photoUri?: string }>).map(
+          (a) => ({
+            displayName: a.displayName || 'Google Maps',
+            uri: normalizeGoogleUri(a.uri),
+            photoUri: normalizeGoogleUri(a.photoUri),
+          })
+        )
       : [];
     return {
       photoName: String(ph.name || ''),
@@ -161,14 +265,17 @@ function mapRawPlace(place: Record<string, unknown>): GooglePlaceCandidate {
       const textObj = (rev.text || rev.originalText) as { text?: string } | undefined;
       return {
         authorName: author?.displayName || 'Cliente no Google',
-        authorUri: author?.uri,
-        authorPhotoUri: author?.photoUri,
+        authorUri: normalizeGoogleUri(author?.uri),
+        authorPhotoUri: normalizeGoogleUri(author?.photoUri),
+        reviewUri: normalizeGoogleUri(
+          typeof rev.googleMapsUri === 'string' ? rev.googleMapsUri : undefined
+        ),
         rating: typeof rev.rating === 'number' ? rev.rating : 5,
         relativeTime: String(rev.relativePublishTimeDescription || ''),
         text: textObj?.text?.trim() || '',
       };
     })
-    .filter((r) => r.text.length > 0);
+    .filter((r) => r.text.length > 0 || r.rating > 0);
 
   const intlPhone = String(place.internationalPhoneNumber || '');
   const description =
@@ -191,6 +298,8 @@ function mapRawPlace(place: Record<string, unknown>): GooglePlaceCandidate {
         ? regularHours.openNow
         : null;
 
+  const googleMapsUri = String(place.googleMapsUri || googleMapsLinks?.placeUri || '');
+
   return {
     placeId: String(place.id || ''),
     name: displayName?.text || '',
@@ -207,10 +316,12 @@ function mapRawPlace(place: Record<string, unknown>): GooglePlaceCandidate {
     internationalPhone: intlPhone,
     whatsappCandidate: extractBrazilianMobileWhatsapp(intlPhone),
     website: String(place.websiteUri || ''),
-    googleMapsUri: String(place.googleMapsUri || ''),
+    googleMapsUri,
     directionsUri: googleMapsLinks?.directionsUri || '',
     reviewsUri: googleMapsLinks?.reviewsUri || '',
     writeReviewUri: googleMapsLinks?.writeAReviewUri || '',
+    photosUri: googleMapsLinks?.photosUri || googleMapsUri,
+    placeUri: googleMapsLinks?.placeUri || googleMapsUri,
     rating: typeof place.rating === 'number' ? place.rating : null,
     userRatingCount: typeof place.userRatingCount === 'number' ? place.userRatingCount : null,
     reviews,
@@ -233,7 +344,11 @@ export async function searchPlacesByText(params: {
 }): Promise<GooglePlaceCandidate[]> {
   const apiKey = getGoogleMapsApiKey();
   if (!apiKey) {
-    return [];
+    throw new GooglePlacesApiError(
+      'Chave GOOGLE_MAPS_API_KEY não configurada no servidor.',
+      503,
+      'GMP_KEY_MISSING'
+    );
   }
 
   const body: Record<string, unknown> = {
@@ -257,6 +372,7 @@ export async function searchPlacesByText(params: {
 
   const response = await fetch('https://places.googleapis.com/v1/places:searchText', {
     method: 'POST',
+    signal: AbortSignal.timeout(8000),
     headers: {
       'Content-Type': 'application/json',
       'X-Goog-Api-Key': apiKey,
@@ -266,24 +382,27 @@ export async function searchPlacesByText(params: {
     body: JSON.stringify(body),
   });
 
-  const json = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-
-  if (response.status === 429 || (json.error as { status?: string } | undefined)?.status === 'RESOURCE_EXHAUSTED') {
-    throw new GoogleMapsQuotaError('Cota da Google Places API atingida no momento.');
+  const rawText = await response.text().catch(() => '');
+  let json: Record<string, unknown> = {};
+  try {
+    json = rawText ? (JSON.parse(rawText) as Record<string, unknown>) : {};
+  } catch {
+    json = {};
   }
 
   if (!response.ok) {
-    const errMsg =
-      (json.error as { message?: string } | undefined)?.message ||
-      `Erro na Google Places API (${response.status})`;
-    throw new Error(errMsg);
+    throw formatPlacesHttpError(response.status, json, rawText);
   }
 
   const places = Array.isArray(json.places)
     ? (json.places as Array<Record<string, unknown>>)
     : [];
 
-  return places.map(mapRawPlace);
+  const mapped = places.map(mapRawPlace);
+  for (const item of mapped) {
+    cacheGooglePlaceCandidate(item);
+  }
+  return mapped;
 }
 
 export interface ProspectingLeadResult extends GooglePlaceCandidate {
@@ -400,60 +519,119 @@ export async function searchPlacesProspecting(params: {
   return { results: scored, requestsUsed, topCompetitor };
 }
 
-export async function getPlaceDetailsById(placeId: string): Promise<GooglePlaceCandidate | null> {
+const PLACE_PHOTOS_ONLY_FIELD_MASK = [
+  'id',
+  'googleMapsUri',
+  'googleMapsLinks.photosUri',
+  'photos',
+].join(',');
+
+export async function getPlaceDetailsById(
+  placeId: string,
+  options?: { photosOnly?: boolean; forceRefresh?: boolean }
+): Promise<GooglePlaceCandidate> {
+  const cleanId = String(placeId || '').replace(/^places\//, '').trim();
+  if (!cleanId) {
+    throw new GooglePlacesApiError('Place ID ausente ou inválido.', 400, 'GMP_INVALID_PLACE_ID');
+  }
+
   const apiKey = getGoogleMapsApiKey();
-  if (!apiKey || !placeId) return null;
+  if (!apiKey) {
+    throw new GooglePlacesApiError(
+      'Chave GOOGLE_MAPS_API_KEY não configurada no servidor.',
+      503,
+      'GMP_KEY_MISSING'
+    );
+  }
+
+  if (!options?.photosOnly && !options?.forceRefresh) {
+    const cached = transientPlaceCache.get(cleanId);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.place;
+    }
+    if (cached) {
+      transientPlaceCache.delete(cleanId);
+    }
+  }
+
+  const fieldMask = options?.photosOnly ? PLACE_PHOTOS_ONLY_FIELD_MASK : PLACE_DETAILS_FIELD_MASK;
 
   const response = await fetch(
-    `https://places.googleapis.com/v1/places/${encodeURIComponent(placeId)}?languageCode=pt-BR&regionCode=BR`,
+    `https://places.googleapis.com/v1/places/${encodeURIComponent(cleanId)}?languageCode=pt-BR&regionCode=BR`,
     {
       method: 'GET',
+      signal: AbortSignal.timeout(8000),
       headers: {
         'Content-Type': 'application/json',
         'X-Goog-Api-Key': apiKey,
-        'X-Goog-FieldMask': PLACE_DETAILS_FIELD_MASK,
+        'X-Goog-FieldMask': fieldMask,
         'X-Goog-Maps-Solution-ID': 'gmp_mcp_codeassist_v1_aistudio',
       },
     }
   );
 
-  const json = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-
-  if (response.status === 429 || (json.error as { status?: string } | undefined)?.status === 'RESOURCE_EXHAUSTED') {
-    throw new GoogleMapsQuotaError('Cota da Google Places API atingida no momento.');
+  const rawText = await response.text().catch(() => '');
+  let json: Record<string, unknown> = {};
+  try {
+    json = rawText ? (JSON.parse(rawText) as Record<string, unknown>) : {};
+  } catch {
+    json = {};
   }
 
   if (!response.ok) {
-    return null;
+    throw formatPlacesHttpError(response.status, json, rawText);
   }
 
-  return mapRawPlace(json);
+  const mapped = mapRawPlace(json);
+  if (!options?.photosOnly) {
+    cacheGooglePlaceCandidate(mapped);
+  }
+  return mapped;
 }
 
 export async function getPlacePhotoMediaUri(
   photoName: string,
   maxWidthPx = 960
-): Promise<string | null> {
+): Promise<string> {
   const apiKey = getGoogleMapsApiKey();
-  if (!apiKey || !/^places\/[^/]+\/photos\/[^/]+$/.test(photoName)) {
-    return null;
+  if (!apiKey) {
+    throw new GooglePlacesApiError(
+      'Chave GOOGLE_MAPS_API_KEY não configurada no servidor.',
+      503,
+      'GMP_KEY_MISSING'
+    );
+  }
+  if (!/^places\/[^/]+\/photos\/[^/]+$/.test(photoName)) {
+    throw new GooglePlacesApiError('Referência de foto Google inválida.', 400, 'GMP_INVALID_PHOTO_REF');
   }
 
-  const clampedWidth = Math.min(1600, Math.max(200, maxWidthPx));
+  const clampedWidth = Math.min(1600, Math.max(200, Math.round(maxWidthPx || 960)));
   const url = `https://places.googleapis.com/v1/${photoName}/media?maxWidthPx=${clampedWidth}&skipHttpRedirect=true`;
 
   const response = await fetch(url, {
     method: 'GET',
+    signal: AbortSignal.timeout(6000),
     headers: {
       'X-Goog-Api-Key': apiKey,
       'X-Goog-Maps-Solution-ID': 'gmp_mcp_codeassist_v1_aistudio',
     },
   });
 
-  if (!response.ok) {
-    return null;
+  const rawText = await response.text().catch(() => '');
+  let json: Record<string, unknown> = {};
+  try {
+    json = rawText ? (JSON.parse(rawText) as Record<string, unknown>) : {};
+  } catch {
+    json = {};
   }
 
-  const json = (await response.json().catch(() => ({}))) as { photoUri?: string };
-  return json.photoUri || null;
+  if (!response.ok) {
+    throw formatPlacesHttpError(response.status, json, rawText);
+  }
+
+  const photoUri = typeof json.photoUri === 'string' ? json.photoUri : '';
+  if (!photoUri) {
+    throw new GooglePlacesApiError('A Google Places API não retornou URL para esta foto.', 404, 'GMP_PHOTO_EMPTY');
+  }
+  return photoUri;
 }
