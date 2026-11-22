@@ -12,6 +12,7 @@ import {
   getBusinessById,
   getDashboardData,
   getMediaAssetByFilename,
+  listIndexableMinisiteSlugs,
   getMinisiteDetail,
   getOrCreateProfile,
   listAuditLogs,
@@ -1670,6 +1671,24 @@ app.post(
   }
 );
 
+app.get('/sitemap.xml', async (req, res, next) => {
+  try {
+    const sites = await listIndexableMinisiteSlugs();
+    const entries = sites.map(({ slug }) => {
+      const url = getServerPublicUrl(req, slug).replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+      return '<url><loc>' + url + '</loc></url>';
+    });
+    res.type('application/xml').send(
+      '<?xml version="1.0" encoding="UTF-8"?>' +
+      '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' +
+      entries.join('') + '</urlset>'
+    );
+  } catch (error) {
+    next(error);
+  }
+});
+
 // Anonymous public published snapshot endpoint for /:slug (and legacy /LinkFoco/:slug, /s/:slug) — strictly returns 404 unless published
 app.get('/api/public/site/:slug', async (req, res) => {
   try {
@@ -2314,6 +2333,7 @@ async function handlePublicRootStatus(
   renderHtml: (url: string) => Promise<string>
 ) {
   if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+  if (req.path.startsWith('/demo/')) res.setHeader('X-Robots-Tag', 'noindex');
   const legacyPrefixedSlug = extractLegacyPrefixedSlugFromPath(req.path);
   const candidateSlug = legacyPrefixedSlug || extractPublicMinisiteSlugFromPath(req.path);
   if (!candidateSlug) return next();
@@ -2327,6 +2347,7 @@ async function handlePublicRootStatus(
       return res.redirect(302, targetPath);
     }
     if (lookup.kind === 'not_found') {
+      res.setHeader('X-Robots-Tag', 'noindex');
       res.setHeader('Cache-Control', 'no-store, max-age=0');
       if (req.method === 'HEAD') {
         return res.status(404).set({ 'Content-Type': 'text/html; charset=utf-8' }).end();
@@ -2340,6 +2361,7 @@ async function handlePublicRootStatus(
       res.setHeader('Cache-Control', 'no-store, max-age=0');
       return res.redirect(302, canonicalPath);
     }
+    if (lookup.minisite.mediaValidated !== true) res.setHeader('X-Robots-Tag', 'noindex');
     if (process.env.NODE_ENV === 'production') {
       res.setHeader(
         'Cache-Control',

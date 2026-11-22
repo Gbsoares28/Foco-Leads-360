@@ -416,11 +416,31 @@ export function MinisiteEditorPreview({
     setUploadingTarget(targetKey);
     setSaveError(null);
     try {
+      let media: Blob = file;
+      if (file.type.startsWith('image/')) {
+        const image = await createImageBitmap(file);
+        try {
+          const maxWidth = targetKey === 'logo' ? 512 : 1600;
+          const scale = Math.min(1, maxWidth / Math.max(image.width, image.height));
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.max(1, Math.round(image.width * scale));
+          canvas.height = Math.max(1, Math.round(image.height * scale));
+          const ctx = canvas.getContext('2d');
+          if (!ctx) throw new Error('Não foi possível preparar a imagem.');
+          ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+          const optimized = await new Promise<Blob | null>((resolve) => {
+            canvas.toBlob(resolve, 'image/webp', 0.84);
+          });
+          if (optimized && (scale < 1 || optimized.size < file.size)) media = optimized;
+        } finally {
+          image.close();
+        }
+      }
       const dataUrl = await new Promise<string>((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve(String(reader.result || ''));
         reader.onerror = () => reject(new Error('Falha ao ler arquivo.'));
-        reader.readAsDataURL(file);
+        reader.readAsDataURL(media);
       });
 
       const uploaded = await apiFetch<{ url: string; mimeType: string }>('/api/uploads', {
