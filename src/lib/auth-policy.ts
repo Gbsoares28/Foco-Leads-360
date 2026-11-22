@@ -1,5 +1,4 @@
 export const ALLOWED_ADMIN_EMAIL = 'gabrieltreinadordeanimais@gmail.com';
-export const ALLOWED_ADMIN_PASSWORD = '100130';
 
 export type LoginValidationResult =
   | { ok: true; normalizedEmail: string }
@@ -33,14 +32,6 @@ export function validateAdminLoginAttempt(
       ok: false,
       reason: 'email_not_allowed',
       error: 'Acesso bloqueado: este e-mail não está autorizado a acessar o sistema.',
-    };
-  }
-
-  if (rawPassword !== ALLOWED_ADMIN_PASSWORD) {
-    return {
-      ok: false,
-      reason: 'invalid_password',
-      error: 'Senha incorreta. Tentativa de acesso bloqueada.',
     };
   }
 

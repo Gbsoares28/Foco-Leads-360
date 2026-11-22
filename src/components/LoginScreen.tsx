@@ -52,7 +52,7 @@ export function LoginScreen() {
         <div className="w-full max-w-md bg-white border border-slate-200 rounded-xl p-8">
           <h2 className="text-xl font-bold text-[#10253D]">Acessar painel interno</h2>
           <p className="mt-2 text-sm text-slate-600">
-            Entre com o e-mail e a senha do administrador autorizados no Firebase Authentication.
+            Entre com o e-mail e a senha do administrador configurados no servidor.
           </p>
 
           {authError && (

@@ -1,8 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import {
-  createUserWithEmailAndPassword,
   onAuthStateChanged,
-  signInWithEmailAndPassword,
   signOut,
   type User,
 } from 'firebase/auth';
@@ -88,39 +86,6 @@ function isAdminSessionTokenExpired(token: string, skewSeconds = 30): boolean {
     return decoded.exp <= now + skewSeconds;
   } catch {
     return true;
-  }
-}
-
-function getFirebaseAuthErrorCode(err: unknown): string {
-  if (err && typeof err === 'object' && 'code' in err) {
-    return String((err as { code?: unknown }).code || '');
-  }
-  return '';
-}
-
-function isProviderDisabledFirebaseError(err: unknown): boolean {
-  const code = getFirebaseAuthErrorCode(err);
-  return (
-    code === 'auth/operation-not-allowed' ||
-    code === 'auth/admin-restricted-operation'
-  );
-}
-
-function mapFirebaseAuthError(err: unknown): string {
-  const code = getFirebaseAuthErrorCode(err);
-  switch (code) {
-    case 'auth/invalid-credential':
-    case 'auth/wrong-password':
-    case 'auth/user-not-found':
-      return 'Credenciais inválidas no Firebase Auth. Verifique se a conta autorizada possui a senha configurada corretamente.';
-    case 'auth/email-already-in-use':
-      return 'Este e-mail já existe no Firebase Auth com outro método ou senha. Redefina a senha no Console do Firebase (Authentication > Users) para concluir o acesso.';
-    case 'auth/too-many-requests':
-      return 'Muitas tentativas seguidas. Aguarde alguns instantes antes de tentar novamente.';
-    case 'auth/network-request-failed':
-      return 'Falha de conexão com a autenticação. Verifique sua internet e tente novamente.';
-    default:
-      return err instanceof Error ? err.message : 'Falha na autenticação.';
   }
 }
 
@@ -283,67 +248,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setSigningIn(true);
       setAuthError(null);
       try {
-        const cred = await signInWithEmailAndPassword(
-          auth,
-          validation.normalizedEmail,
-          password
-        );
-        await syncProfile(cred.user);
-        return true;
-      } catch (err) {
-        if (isProviderDisabledFirebaseError(err)) {
-          try {
-            return await authenticateViaServerSession(
-              validation.normalizedEmail,
-              password
-            );
-          } catch (serverErr) {
-            setAuthError(
-              serverErr instanceof Error
-                ? serverErr.message
-                : 'Falha na autenticação.'
-            );
-            return false;
-          }
-        }
-
-        const code = getFirebaseAuthErrorCode(err);
-        if (code === 'auth/user-not-found' || code === 'auth/invalid-credential') {
-          try {
-            const created = await createUserWithEmailAndPassword(
-              auth,
-              validation.normalizedEmail,
-              password
-            );
-            await syncProfile(created.user);
-            return true;
-          } catch (createErr) {
-            if (isProviderDisabledFirebaseError(createErr)) {
-              try {
-                return await authenticateViaServerSession(
-                  validation.normalizedEmail,
-                  password
-                );
-              } catch (serverErr) {
-                setAuthError(
-                  serverErr instanceof Error
-                    ? serverErr.message
-                    : 'Falha na autenticação.'
-                );
-                return false;
-              }
-            }
-            setAuthError(mapFirebaseAuthError(createErr));
-            return false;
-          }
-        }
-        setAuthError(mapFirebaseAuthError(err));
+        return await authenticateViaServerSession(validation.normalizedEmail, password);
+      } catch (error) {
+        setAuthError(error instanceof Error ? error.message : 'Falha na autenticação.');
         return false;
       } finally {
         setSigningIn(false);
       }
     },
-    [authenticateViaServerSession, syncProfile]
+    [authenticateViaServerSession]
   );
 
   const logout = useCallback(async () => {

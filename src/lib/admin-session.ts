@@ -1,8 +1,6 @@
 import crypto from 'crypto';
-import firebaseConfig from '../../firebase-applet-config.json' with { type: 'json' };
 import {
   ALLOWED_ADMIN_EMAIL,
-  ALLOWED_ADMIN_PASSWORD,
   normalizeAuthEmail,
   type LoginValidationResult,
 } from './auth-policy.ts';
@@ -30,17 +28,11 @@ export interface AdminSessionPayload {
 }
 
 function getAdminSessionSecret(): string {
-  const configuredSecret =
-    process.env.SESSION_SECRET?.trim() || process.env.AUTH_TOKEN_SECRET?.trim();
-  if (configuredSecret) {
-    return configuredSecret;
+  const secret = process.env.SESSION_SECRET;
+  if (!secret || Buffer.byteLength(secret) < 32) {
+    throw new Error('Configure SESSION_SECRET no servidor com pelo menos 32 bytes aleatórios.');
   }
-  return crypto
-    .createHash('sha256')
-    .update(
-      `${firebaseConfig.projectId}:${firebaseConfig.apiKey}:foco-leads-360-admin-auth`
-    )
-    .digest('hex');
+  return secret;
 }
 
 function timingSafeTextEqual(a: string, b: string): boolean {
@@ -72,7 +64,11 @@ export function verifyAdminCredentialsServer(
     };
   }
 
-  if (!timingSafeTextEqual(rawPassword, ALLOWED_ADMIN_PASSWORD)) {
+  const configuredPassword = process.env.ADMIN_PASSWORD;
+  if (!configuredPassword || configuredPassword.length < 16) {
+    throw new Error('Configure ADMIN_PASSWORD no servidor com pelo menos 16 caracteres.');
+  }
+  if (!timingSafeTextEqual(rawPassword, configuredPassword)) {
     return {
       ok: false,
       reason: 'invalid_password',

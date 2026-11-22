@@ -1,6 +1,5 @@
 import type { NextFunction, Request, Response } from 'express';
 import type { DecodedIdToken } from 'firebase-admin/auth';
-import { adminAuth } from '../lib/firebase-admin.ts';
 import { getOrCreateProfile, type ProfileRecord } from '../db/repositories.ts';
 import { hasPermission, isValidRole, type Permission } from '../lib/rbac.ts';
 import type { UserRole } from '../db/schema.ts';
@@ -30,7 +29,7 @@ export const requireAuth = async (
     });
   }
 
-  const token = authHeader.split('Bearer ')[1];
+  const token = authHeader.slice('Bearer '.length);
 
   if (token.startsWith(ADMIN_SESSION_TOKEN_PREFIX)) {
     try {
@@ -81,61 +80,10 @@ export const requireAuth = async (
     }
   }
 
-  try {
-    const decodedToken = await adminAuth.verifyIdToken(token);
-    const signInProvider =
-      typeof decodedToken.firebase?.sign_in_provider === 'string'
-        ? decodedToken.firebase.sign_in_provider
-        : null;
-
-    const accessCheck = isAuthorizedFirebaseAccount({
-      email: decodedToken.email ?? null,
-      signInProvider,
-    });
-
-    if (!accessCheck.allowed) {
-      return res.status(403).json({
-        error:
-          accessCheck.error ||
-          'Acesso bloqueado. Apenas o administrador autorizado pode acessar o sistema.',
-      });
-    }
-
-    req.firebaseUser = decodedToken;
-
-    const email = decodedToken.email ?? '';
-    const fullName =
-      decodedToken.name || (email ? email.split('@')[0] : 'Administrador Feed em Foco');
-
-    const profile = await getOrCreateProfile({
-      uid: decodedToken.uid,
-      email,
-      fullName,
-    });
-
-    if (!profile.active) {
-      return res.status(403).json({
-        error: 'Sua conta interna está desativada. Contate o administrador.',
-      });
-    }
-
-    req.profile = profile;
-    next();
-  } catch (error) {
-    const code =
-      error && typeof error === 'object' && 'code' in error
-        ? String((error as { code?: unknown }).code || '')
-        : '';
-    if (code === 'auth/id-token-expired' || code === 'auth/argument-error') {
-      console.warn('Token Firebase expirado ou inválido:', code);
-    } else {
-      console.error('Erro ao verificar token Firebase:', error);
-    }
-    return res.status(401).json({
-      error: 'Sessão inválida ou expirada. Faça login novamente.',
-      code: code === 'auth/id-token-expired' ? 'SESSION_EXPIRED' : 'SESSION_INVALID',
-    });
-  }
+  return res.status(401).json({
+    error: 'Sessão inválida ou expirada. Faça login novamente.',
+    code: 'SESSION_INVALID',
+  });
 };
 
 export const optionalAuthOrDemo = async (
