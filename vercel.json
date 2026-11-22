@@ -18,7 +18,7 @@
     },
     {
       "source": "/sitemap.xml",
-      "destination": "/sitemap.xml"
+      "destination": "https://foco-leads-360.ai.studio/sitemap.xml"
     },
     {
       "source": "/manifest.json",
@@ -45,28 +45,28 @@
       "destination": "https://foco-leads-360.ai.studio/q/:code"
     },
     {
-      "source": "/api/:path*",
+      "source": "/api/:path((?!minisite-html$).*)",
       "destination": "https://foco-leads-360.ai.studio/api/:path*"
     },
     {
       "source": "/LinkFoco/:slug",
-      "destination": "/index.html"
+      "destination": "/api/minisite-html?slug=:slug&preview=1"
     },
     {
       "source": "/linkfoco/:slug",
-      "destination": "/index.html"
+      "destination": "/api/minisite-html?slug=:slug&preview=1"
     },
     {
       "source": "/s/:slug",
-      "destination": "/index.html"
+      "destination": "/api/minisite-html?slug=:slug&preview=1"
     },
     {
       "source": "/demo/:slug",
-      "destination": "/index.html"
+      "destination": "/api/minisite-html?slug=:slug&preview=1"
     },
     {
       "source": "/:slug((?!api$|admin$|painel$|dashboard$|login$|logout$|auth$|signin$|signup$|register$|oauth$|callback$|assets$|uploads$|public$|static$|health$|q$|m$|demo$|site$|s$|linkfoco$|minisites$|minisite$|criar-minisite$|prospeccao$|crm$|qr-codes$|qrcodes$|scripts$|configuracoes$|config$|empresas$|equipe$|logs$|diagnosticos$|propostas$|whatsapp$|fluxos$|agenda$|projetos$|clientes$|cobrancas$|relatorios$|integracoes$|ajuda$)[a-z0-9-]{3,64})",
-      "destination": "/index.html"
+      "destination": "/api/minisite-html?slug=:slug"
     }
   ],
   "headers": [
@@ -101,5 +101,10 @@
         }
       ]
     }
-  ]
+  ],
+  "functions": {
+    "api/minisite-html.js": {
+      "includeFiles": "dist/index.html"
+    }
+  }
 }

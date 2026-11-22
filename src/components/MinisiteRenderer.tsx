@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import {
   Calendar,
   Check,
@@ -29,7 +29,6 @@ import {
   type MinisiteTheme,
 } from '../lib/minisite-types';
 import { groupWeekdayHours } from '../lib/minisite-builder';
-import { preloadImageBatch } from '../lib/image-cache';
 import { PlaceMap } from './PlaceMap';
 import { ResilientImage } from './ResilientImage';
 import {
@@ -111,9 +110,11 @@ function isDarkHex(hex?: string): boolean {
 export function MinisiteRenderer({
   minisite,
   compact = false,
+  publicPage = false,
 }: {
   minisite: RenderableMinisite;
   compact?: boolean;
+  publicPage?: boolean;
 }) {
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [formState, setFormState] = useState({ name: '', message: '' });
@@ -203,21 +204,15 @@ export function MinisiteRenderer({
   const radiusClass = getButtonRadiusClass(theme.buttonRadius);
 
   const coverBlock = minisite.blocks.find((b) => b.blockType === 'capa');
-  const coverImage = theme.coverImage || String(coverBlock?.content?.image || '');
-  const coverVideo = theme.coverVideo || '';
-  const logoImage = theme.logoImage || '';
+  const displayPhoto = (url: string) =>
+    !publicPage || /^\/uploads\/[\w.-]+$/.test(url) ? url : '';
+  const coverImage = displayPhoto( theme.coverImage || String(coverBlock?.content?.image || ''));
+  const coverVideo = displayPhoto(theme.coverVideo || '');
+  const logoImage = displayPhoto(theme.logoImage || '');
   const heroTitle = minisite.title || String(coverBlock?.content?.title || 'Empresa');
   const heroSubtitle = String(
     coverBlock?.content?.subtitle || minisite.business?.category || ''
   );
-
-  useEffect(() => {
-    const galleryBlock = minisite.blocks.find((b) => b.blockType === 'galeria' && b.visible);
-    const galleryUrls = Array.isArray(galleryBlock?.content?.images)
-      ? (galleryBlock.content.images as GalleryPhotoItem[]).map((g) => g.url)
-      : [];
-    void preloadImageBatch([coverImage, logoImage, ...galleryUrls], 3);
-  }, [coverImage, logoImage, minisite.blocks]);
 
   const whatsappBlock = minisite.blocks.find((b) => b.blockType === 'whatsapp' && b.visible);
   const rawWhatsappDigits = String(
@@ -887,7 +882,7 @@ export function MinisiteRenderer({
           }
 
           if (block.blockType === 'galeria') {
-            const images = Array.isArray(c.images) ? (c.images as GalleryPhotoItem[]) : [];
+            const images = Array.isArray(c.images) ? (c.images as GalleryPhotoItem[]).filter((image) => displayPhoto(image.url)) : [];
             if (images.length === 0) return null;
             return (
               <div key={key} className="space-y-1.5 pt-1">
@@ -902,6 +897,7 @@ export function MinisiteRenderer({
                           src={img.url}
                           alt={img.caption || `${heroTitle} foto ${gIdx + 1}`}
                           variant="gallery"
+                          loading="lazy"
                           fallbackLabel="Imagem indisponível"
                           referrerPolicy="no-referrer"
                           className="w-full h-full object-cover"
@@ -966,7 +962,7 @@ export function MinisiteRenderer({
             );
             const loc = c.location as { lat?: number; lng?: number } | null | undefined;
             const showMap =
-              c.showMap !== false && typeof loc?.lat === 'number' && typeof loc?.lng === 'number';
+              !publicPage && c.showMap !== false && typeof loc?.lat === 'number' && typeof loc?.lng === 'number';
 
             return (
               <div key={key} className="rounded-2xl overflow-hidden" style={cardStyle}>
