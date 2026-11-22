@@ -1,5 +1,6 @@
 import { and, count, desc, eq, ilike, ne, or, sql } from 'drizzle-orm';
 import { db } from './index.ts';
+import { publicReviewBlocks } from '../lib/minisite-types.ts';
 import {
   auditLogs,
   businesses,
@@ -784,7 +785,7 @@ export async function publishMinisiteSnapshot(params: {
       theme: minisite.theme,
       seo: minisite.seo,
       business,
-      blocks,
+      blocks: publicReviewBlocks(blocks),
       publishedAt: now.toISOString(),
       mediaValidated: true,
     };

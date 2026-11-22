@@ -51,6 +51,8 @@ import {
   SITE_STYLE_PRESETS,
   TEMPLATE_OPTIONS,
   type GalleryPhotoItem,
+  googleReviewKey,
+  visibleGoogleReviews,
   type GoogleReviewItem,
   type MinisiteBlockData,
   type MinisiteBlockType,
@@ -2083,7 +2085,10 @@ export function MinisiteEditorPreview({
                                   <div className="text-[11px] font-medium text-slate-600">
                                     Avaliações importadas ({((c.reviews as GoogleReviewItem[]) || []).length})
                                   </div>
-                                  {((c.reviews as GoogleReviewItem[]) || []).map((rev, rIdx, arr) => (
+                                  <p className="text-xs text-slate-600">
+                                    {visibleGoogleReviews(c).length} em exibição. Salve e republique para atualizar o site.
+                                  </p>
+                                  {((c.reviews as GoogleReviewItem[]) || []).map((rev, rIdx) => (
                                     <div
                                       key={rIdx}
                                       className="p-2 rounded-lg border border-slate-200 bg-white flex items-start justify-between gap-2 text-xs"
@@ -2099,17 +2104,25 @@ export function MinisiteEditorPreview({
                                         )}
                                         <p className="text-slate-600 line-clamp-2">{rev.text}</p>
                                       </div>
-                                      <button
-                                        type="button"
-                                        onClick={() =>
-                                          updateBlockContent(index, {
-                                            reviews: arr.filter((_, i) => i !== rIdx),
-                                          })
-                                        }
-                                        className="text-red-500 p-1 cursor-pointer shrink-0"
-                                      >
-                                        <Trash2 className="w-3.5 h-3.5" />
-                                      </button>
+                                      <label className="flex items-center gap-2 shrink-0 cursor-pointer">
+                                        <input
+                                          type="checkbox"
+                                          checked={visibleGoogleReviews(c).includes(rev)}
+                                          onChange={(event) => {
+                                            const selected = new Set(
+                                              Array.isArray(c.selectedReviewKeys)
+                                                ? c.selectedReviewKeys as string[]
+                                                : visibleGoogleReviews(c).map(googleReviewKey),
+                                            );
+                                            const key = googleReviewKey(rev);
+                                            if (event.target.checked) selected.add(key);
+                                            else selected.delete(key);
+                                            updateBlockContent(index, { selectedReviewKeys: [...selected] });
+                                          }}
+                                          aria-label={`Exibir avaliação de ${rev.authorName}`}
+                                        />
+                                        Exibir
+                                      </label>
                                     </div>
                                   ))}
                                 </div>

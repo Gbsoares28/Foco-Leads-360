@@ -74,6 +74,36 @@ export interface GoogleReviewItem {
   text: string;
 }
 
+export function googleReviewKey(review: GoogleReviewItem): string {
+  return review.reviewUri || JSON.stringify([review.authorUri || review.authorName, review.text]);
+}
+
+export function visibleGoogleReviews(content: Record<string, unknown>): GoogleReviewItem[] {
+  const reviews = Array.isArray(content.reviews) ? content.reviews as GoogleReviewItem[] : [];
+  if (!Array.isArray(content.selectedReviewKeys)) return reviews;
+
+  const selected = new Set(content.selectedReviewKeys);
+  return reviews.filter((review) => selected.has(googleReviewKey(review)));
+}
+
+export function publicReviewBlocks<T extends { blockType: string; content: Record<string, unknown> }>(
+  blocks: T[],
+): T[] {
+  return blocks.map((block) => {
+    if (block.blockType !== 'avaliacoes' || !Array.isArray(block.content.selectedReviewKeys)) {
+      return block;
+    }
+
+    const content: Record<string, unknown> = {
+      ...block.content,
+      title: 'Avaliações selecionadas',
+      reviews: visibleGoogleReviews(block.content),
+    };
+    delete content.selectedReviewKeys;
+    return { ...block, content };
+  });
+}
+
 export interface GalleryPhotoItem {
   url: string;
   caption?: string;

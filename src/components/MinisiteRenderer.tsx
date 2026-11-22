@@ -24,7 +24,7 @@ import {
   mixHexColors,
   pickReadableTextColor,
   type GalleryPhotoItem,
-  type GoogleReviewItem,
+  visibleGoogleReviews,
   type MinisiteBlockData,
   type MinisiteTheme,
 } from '../lib/minisite-types';
@@ -708,7 +708,7 @@ export function MinisiteRenderer({
               c.reviewsUri || minisite.business?.googleMapsUrl || ''
             );
             const writeReviewUri = String(c.writeReviewUri || '');
-            const reviews = Array.isArray(c.reviews) ? (c.reviews as GoogleReviewItem[]) : [];
+            const reviews = visibleGoogleReviews(c);
 
             return (
               <div key={key} className="pt-2 space-y-2.5">
@@ -718,7 +718,7 @@ export function MinisiteRenderer({
                       className="text-base sm:text-lg font-extrabold tracking-tight"
                       style={{ color: textColor }}
                     >
-                      {String(c.title || 'Quem conhece recomenda')}
+                      {Array.isArray(c.selectedReviewKeys) ? 'Avaliações selecionadas' : String(c.title || 'Quem conhece recomenda')}
                     </h3>
                     {rating != null && (
                       <div className="flex items-center flex-wrap gap-1.5 mt-0.5 text-xs">

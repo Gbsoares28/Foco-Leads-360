@@ -85,6 +85,7 @@ import {
   enforceThemePaletteContrast,
   getDefaultPaletteForTemplate,
   type MinisiteTheme,
+  publicReviewBlocks,
 } from './src/lib/minisite-types.ts';
 import {
   buildGoogleGalleryImages,
@@ -1753,7 +1754,7 @@ app.get('/api/public/minisite/:slug', async (req, res) => {
       return res.status(404).json({ error: 'Minisite não encontrado ou desativado.' });
     }
     res.json({
-      minisite: detail,
+      minisite: { ...detail, blocks: publicReviewBlocks(detail.blocks) },
       publicUrl: getServerPublicUrl(req, detail.slug),
     });
   } catch (error: unknown) {

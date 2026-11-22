@@ -40,11 +40,11 @@ export const NAV_GROUPS: Array<{ title: string; items: NavItem[] }> = [
   {
     title: 'Principal',
     items: [
-      { path: '/', label: 'Dashboard', icon: LayoutDashboard },
-      { path: '/prospeccao', label: 'Buscar', icon: Search },
-      { path: '/crm', label: 'Painel CRM', icon: Kanban },
+      { path: '/crm', label: 'Painel comercial', icon: Kanban },
+      { path: '/prospeccao', label: 'Buscar comércios', icon: Search },
       { path: '/minisites', label: 'Minisites', icon: Globe, primary: true },
       { path: '/criar-minisite', label: 'Criar minisite', icon: Sparkles },
+      { path: '/', label: 'Indicadores', icon: LayoutDashboard },
       { path: '/empresas', label: 'Empresas', icon: Building2 },
     ],
   },

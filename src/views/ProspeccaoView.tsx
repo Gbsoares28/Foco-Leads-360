@@ -57,18 +57,6 @@ interface ProspectResult {
   opportunityReasons: string[];
 }
 
-interface SearchHistoryItem {
-  id: number;
-  country: string;
-  state: string;
-  city: string;
-  niche: string;
-  neighborhoods: string;
-  requestsUsed: number;
-  resultsCount: number;
-  createdAt: string;
-}
-
 export function ProspeccaoView({ onNavigate }: { onNavigate: (path: string) => void }) {
   const { apiFetch, showDemoData, isDemoSession, profile, logout } = useAuth();
 
@@ -80,7 +68,6 @@ export function ProspeccaoView({ onNavigate }: { onNavigate: (path: string) => v
   const [onlyWithoutWebsite, setOnlyWithoutWebsite] = useState(false);
 
   const [usage, setUsage] = useState({ used: 0, limit: 30, remaining: 30 });
-  const [history, setHistory] = useState<SearchHistoryItem[]>([]);
   const [results, setResults] = useState<ProspectResult[]>([]);
   const [topCompetitor, setTopCompetitor] = useState<{
     name: string;
@@ -98,10 +85,8 @@ export function ProspeccaoView({ onNavigate }: { onNavigate: (path: string) => v
     try {
       const res = await apiFetch<{
         usage: { used: number; limit: number; remaining: number };
-        history: SearchHistoryItem[];
       }>(`/api/prospeccao/usage?demo=${showDemoData}`);
       setUsage(res.usage);
-      setHistory(res.history || []);
     } catch {
       // ignore initial non-blocking load failure
     }
@@ -585,43 +570,6 @@ export function ProspeccaoView({ onNavigate }: { onNavigate: (path: string) => v
         </div>
       )}
 
-      {/* Recent Search History */}
-      {history.length > 0 && (
-        <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-3">
-          <h2 className="text-sm font-bold text-[#10253D]">Buscas recentes</h2>
-          <div className="divide-y divide-slate-100">
-            {history.map((h) => (
-              <div
-                key={h.id}
-                className="py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs"
-              >
-                <div className="text-[#10253D] font-medium">
-                  {h.niche} em {h.city}
-                  {h.state ? ` (${h.state})` : ''}
-                  {h.neighborhoods ? ` · ${h.neighborhoods}` : ''}
-                </div>
-                <div className="flex items-center gap-3 text-slate-500 tabular-nums">
-                  <span>{h.resultsCount} empresas</span>
-                  <span>·</span>
-                  <span>{new Date(h.createdAt).toLocaleDateString('pt-BR')}</span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setCity(h.city);
-                      setStateUf(h.state);
-                      setNiche(h.niche);
-                      setNeighborhoods(h.neighborhoods);
-                    }}
-                    className="text-[#1677F2] font-semibold hover:underline cursor-pointer"
-                  >
-                    Preencher
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
     </div>
   );
 }
