@@ -1,5 +1,6 @@
 import { and, count, desc, eq, ilike, ne, or, sql } from 'drizzle-orm';
 import { db } from './index.ts';
+import { publicReviewBlocks } from '../lib/minisite-types.ts';
 import {
   auditLogs,
   businesses,
@@ -740,6 +741,39 @@ export async function publishMinisiteSnapshot(params: {
       .where(eq(minisiteBlocks.minisiteId, minisite.id))
       .orderBy(minisiteBlocks.position);
 
+    const theme = minisite.theme as Record<string, unknown> | null;
+    const cover = blocks.find((block) => block.blockType === 'capa');
+    const media: Array<[string, unknown]> = [
+      ['Capa', theme?.coverVideo || theme?.coverImage || cover?.content?.image],
+    ];
+    if (theme?.logoImage) media.push(['Logo', theme.logoImage]);
+    for (const block of blocks) {
+      if (!block.visible || block.blockType !== 'galeria') continue;
+      const images = block.content?.images;
+      if (Array.isArray(images)) {
+        images.forEach((image, index) => media.push([
+          'Galeria ' + (block.position + 1) + ', foto ' + (index + 1), image?.url,
+        ]));
+      }
+    }
+    const issues: string[] = [];
+    for (const [label, url] of media) {
+      const match = typeof url === 'string' && /^\/uploads\/([0-9]+-[a-f0-9]{12}\.(jpg|png|webp|mp4))$/.exec(url);
+      if (!match || (match[2] === 'mp4' && label !== 'Capa')) {
+        issues.push(label + ': envie um arquivo original pelo editor.');
+        continue;
+      }
+      const [asset] = await tx.select({
+        mimeType: mediaAssets.mimeType,
+        sizeBytes: mediaAssets.sizeBytes,
+      }).from(mediaAssets).where(eq(mediaAssets.filename, match[1])).limit(1);
+      const mime = match[2] === 'mp4' ? 'video/mp4' : 'image/' + (match[2] === 'jpg' ? 'jpeg' : match[2]);
+      if (!asset || asset.sizeBytes <= 0 || asset.mimeType !== mime) {
+        issues.push(label + ': arquivo indisponível ou formato inválido.');
+      }
+    }
+    if (issues.length) throw new SlugValidationError(issues.join(' '), 422);
+
     const now = new Date();
     const snapshot = {
       id: minisite.id,
@@ -751,8 +785,9 @@ export async function publishMinisiteSnapshot(params: {
       theme: minisite.theme,
       seo: minisite.seo,
       business,
-      blocks,
+      blocks: publicReviewBlocks(blocks),
       publishedAt: now.toISOString(),
+      mediaValidated: true,
     };
 
     const [updated] = await tx
@@ -938,6 +973,13 @@ export async function resolvePublicMinisiteLookup(
     targetSlug: target.targetSlug,
     minisiteId: target.minisiteId,
   };
+}
+
+export async function listIndexableMinisiteSlugs() {
+  return db.select({ slug: minisites.slug }).from(minisites).where(and(
+    eq(minisites.status, 'publicado'),
+    sql`${minisites.publishedSnapshot}->'mediaValidated' = 'true'::jsonb`
+  ));
 }
 
 export async function getPublishedMinisiteBySlug(rawSlug: string, incrementViews = false) {

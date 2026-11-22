@@ -188,32 +188,27 @@ import {
   verifyAdminCredentialsServer,
   verifyAdminSessionToken,
 } from '../src/lib/admin-session.ts';
-import firebaseConfig from '../firebase-applet-config.json' with { type: 'json' };
 import crypto from 'node:crypto';
 import { optionalAuthOrDemo, requireAuth } from '../src/middleware/auth.ts';
 
-test('Auth policy allows only gabrieltreinadordeanimais@gmail.com with exact password 100130', () => {
+process.env.SESSION_SECRET = crypto.randomBytes(32).toString('hex');
+process.env.ADMIN_PASSWORD = 'test-only-admin-password-32-character';
+test('Auth policy allows only gabrieltreinadordeanimais@gmail.com with required form fields', () => {
   assert.equal(ALLOWED_ADMIN_EMAIL, 'gabrieltreinadordeanimais@gmail.com');
   assert.equal(isAuthorizedAdminEmail('  GabrielTreinadorDeAnimais@gmail.com '), true);
   assert.equal(isAuthorizedAdminEmail('outro@gmail.com'), false);
   assert.equal(isAuthorizedAdminEmail(''), false);
 
-  const valid = validateAdminLoginAttempt('  GabrielTreinadorDeAnimais@gmail.com ', '100130');
+  const valid = validateAdminLoginAttempt('  GabrielTreinadorDeAnimais@gmail.com ', 'test-only-admin-password-32-character');
   assert.equal(valid.ok, true);
   if (valid.ok) {
     assert.equal(valid.normalizedEmail, 'gabrieltreinadordeanimais@gmail.com');
   }
 
-  const wrongEmail = validateAdminLoginAttempt('intruder@gmail.com', '100130');
+  const wrongEmail = validateAdminLoginAttempt('intruder@gmail.com', 'test-only-admin-password-32-character');
   assert.equal(wrongEmail.ok, false);
   if (!wrongEmail.ok) {
     assert.equal(wrongEmail.reason, 'email_not_allowed');
-  }
-
-  const wrongPassword = validateAdminLoginAttempt('gabrieltreinadordeanimais@gmail.com', '999999');
-  assert.equal(wrongPassword.ok, false);
-  if (!wrongPassword.ok) {
-    assert.equal(wrongPassword.reason, 'invalid_password');
   }
 
   const emptyInput = validateAdminLoginAttempt('', '');
@@ -253,10 +248,10 @@ test('Auth policy blocks Google OAuth and unauthorized Firebase providers even f
 });
 
 test('Server admin session verification and signed tokens allow only authorized admin and reject tampering', () => {
-  const okCred = verifyAdminCredentialsServer('  GabrielTreinadorDeAnimais@gmail.com ', '100130');
+  const okCred = verifyAdminCredentialsServer('  GabrielTreinadorDeAnimais@gmail.com ', 'test-only-admin-password-32-character');
   assert.equal(okCred.ok, true);
 
-  const badEmail = verifyAdminCredentialsServer('outro@gmail.com', '100130');
+  const badEmail = verifyAdminCredentialsServer('outro@gmail.com', 'test-only-admin-password-32-character');
   assert.equal(badEmail.ok, false);
 
   const badPass = verifyAdminCredentialsServer('gabrieltreinadordeanimais@gmail.com', '123456');
@@ -332,13 +327,7 @@ test('Backend auth middleware blocks unauthenticated requests, tampered admin-se
   assert.equal(mock3.out.statusCode, 401);
 
   // Build an expired admin session token signed with the active secret and ensure 401 SESSION_EXPIRED without console.error
-  const secret =
-    process.env.SESSION_SECRET?.trim() ||
-    process.env.AUTH_TOKEN_SECRET?.trim() ||
-    crypto
-      .createHash('sha256')
-      .update(`${firebaseConfig.projectId}:${firebaseConfig.apiKey}:foco-leads-360-admin-auth`)
-      .digest('hex');
+  const secret = process.env.SESSION_SECRET!;
   const expiredPayloadB64 = Buffer.from(
     JSON.stringify({
       sub: 'admin-gabrieltreinadordeanimais',

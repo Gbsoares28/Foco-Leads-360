@@ -140,7 +140,7 @@ export function MinisitePublicPreview({
         style={{ backgroundColor: minisite.theme?.backgroundColor || '#FAF5ED' }}
       >
         <div className="w-full max-w-[460px] min-h-screen sm:min-h-0 sm:rounded-3xl overflow-hidden flex flex-col">
-          <MinisiteRenderer minisite={minisite} />
+          <MinisiteRenderer minisite={minisite} publicPage />
         </div>
       </div>
     );

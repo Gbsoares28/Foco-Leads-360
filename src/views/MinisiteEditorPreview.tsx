@@ -51,6 +51,8 @@ import {
   SITE_STYLE_PRESETS,
   TEMPLATE_OPTIONS,
   type GalleryPhotoItem,
+  googleReviewKey,
+  visibleGoogleReviews,
   type GoogleReviewItem,
   type MinisiteBlockData,
   type MinisiteBlockType,
@@ -416,11 +418,31 @@ export function MinisiteEditorPreview({
     setUploadingTarget(targetKey);
     setSaveError(null);
     try {
+      let media: Blob = file;
+      if (file.type.startsWith('image/')) {
+        const image = await createImageBitmap(file);
+        try {
+          const maxWidth = targetKey === 'logo' ? 512 : 1600;
+          const scale = Math.min(1, maxWidth / Math.max(image.width, image.height));
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.max(1, Math.round(image.width * scale));
+          canvas.height = Math.max(1, Math.round(image.height * scale));
+          const ctx = canvas.getContext('2d');
+          if (!ctx) throw new Error('Não foi possível preparar a imagem.');
+          ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+          const optimized = await new Promise<Blob | null>((resolve) => {
+            canvas.toBlob(resolve, 'image/webp', 0.84);
+          });
+          if (optimized && (scale < 1 || optimized.size < file.size)) media = optimized;
+        } finally {
+          image.close();
+        }
+      }
       const dataUrl = await new Promise<string>((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve(String(reader.result || ''));
         reader.onerror = () => reject(new Error('Falha ao ler arquivo.'));
-        reader.readAsDataURL(file);
+        reader.readAsDataURL(media);
       });
 
       const uploaded = await apiFetch<{ url: string; mimeType: string }>('/api/uploads', {
@@ -2063,7 +2085,10 @@ export function MinisiteEditorPreview({
                                   <div className="text-[11px] font-medium text-slate-600">
                                     Avaliações importadas ({((c.reviews as GoogleReviewItem[]) || []).length})
                                   </div>
-                                  {((c.reviews as GoogleReviewItem[]) || []).map((rev, rIdx, arr) => (
+                                  <p className="text-xs text-slate-600">
+                                    {visibleGoogleReviews(c).length} em exibição. Salve e republique para atualizar o site.
+                                  </p>
+                                  {((c.reviews as GoogleReviewItem[]) || []).map((rev, rIdx) => (
                                     <div
                                       key={rIdx}
                                       className="p-2 rounded-lg border border-slate-200 bg-white flex items-start justify-between gap-2 text-xs"
@@ -2079,17 +2104,25 @@ export function MinisiteEditorPreview({
                                         )}
                                         <p className="text-slate-600 line-clamp-2">{rev.text}</p>
                                       </div>
-                                      <button
-                                        type="button"
-                                        onClick={() =>
-                                          updateBlockContent(index, {
-                                            reviews: arr.filter((_, i) => i !== rIdx),
-                                          })
-                                        }
-                                        className="text-red-500 p-1 cursor-pointer shrink-0"
-                                      >
-                                        <Trash2 className="w-3.5 h-3.5" />
-                                      </button>
+                                      <label className="flex items-center gap-2 shrink-0 cursor-pointer">
+                                        <input
+                                          type="checkbox"
+                                          checked={visibleGoogleReviews(c).includes(rev)}
+                                          onChange={(event) => {
+                                            const selected = new Set(
+                                              Array.isArray(c.selectedReviewKeys)
+                                                ? c.selectedReviewKeys as string[]
+                                                : visibleGoogleReviews(c).map(googleReviewKey),
+                                            );
+                                            const key = googleReviewKey(rev);
+                                            if (event.target.checked) selected.add(key);
+                                            else selected.delete(key);
+                                            updateBlockContent(index, { selectedReviewKeys: [...selected] });
+                                          }}
+                                          aria-label={`Exibir avaliação de ${rev.authorName}`}
+                                        />
+                                        Exibir
+                                      </label>
                                     </div>
                                   ))}
                                 </div>

@@ -918,6 +918,7 @@ test('Database publishing lifecycle enforces unique slugs, snapshot isolation, d
 
   const uniqueSuffix = Date.now().toString(36);
   const createdMinisiteIds: number[] = [];
+  let createdCoverAsset: string | undefined;
   let createdBusinessId: number | null = null;
   let createdTempProfileId: number | null = null;
 
@@ -1020,6 +1021,25 @@ test('Database publishing lifecycle enforces unique slugs, snapshot isolation, d
       (err: unknown) => err instanceof SlugValidationError && err.status === 409
     );
 
+    await assert.rejects(
+      () => publishMinisiteSnapshot({ minisiteId: m1.id, actorId }),
+      (error: unknown) => error instanceof SlugValidationError && error.status === 422
+    );
+    const coverAsset = Date.now() + '-000000000001.png';
+    createdCoverAsset = coverAsset;
+    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+    await saveMediaAsset({
+      filename: coverAsset,
+      mimeType: 'image/png',
+      dataBase64: png,
+      sizeBytes: Buffer.from(png, 'base64').length,
+    });
+    const theme = { ...BASE_THEME, coverImage: '/uploads/' + coverAsset };
+    await updateMinisiteFull({
+      minisiteId: m1.id, title: m1.title, templateId: m1.templateId, theme,
+      seo: m1.seo as Record<string, unknown>, blocks: [], actorId,
+    });
+
     // Publish V1 snapshot
     await publishMinisiteSnapshot({ minisiteId: m1.id, actorId });
     const pubV1 = (await getPublishedMinisiteBySlug(m1.slug, false)) as Record<string, unknown> | null;
@@ -1032,7 +1052,7 @@ test('Database publishing lifecycle enforces unique slugs, snapshot isolation, d
       minisiteId: m1.id,
       title: `${baseTitle} V2 Rascunho`,
       templateId: m1.templateId,
-      theme: m1.theme as Record<string, unknown>,
+      theme,
       seo: m1.seo as Record<string, unknown>,
       blocks: [{ blockType: 'capa', visible: true, content: { title: 'Versão V2', subtitle: 'Editada' } }],
       actorId,
@@ -1154,6 +1174,9 @@ test('Database publishing lifecycle enforces unique slugs, snapshot isolation, d
     assert.equal(storedAsset.mimeType, 'image/png');
     await db.delete(mediaAssets).where(eq(mediaAssets.filename, mediaName)).catch(() => {});
   } finally {
+    if (createdCoverAsset) {
+      await db.delete(mediaAssets).where(eq(mediaAssets.filename, createdCoverAsset)).catch(() => {});
+    }
     for (const msId of createdMinisiteIds) {
       await db.delete(auditLogs).where(eq(auditLogs.entityId, String(msId))).catch(() => {});
       await deleteMinisiteRecord({ minisiteId: msId, actorId: createdTempProfileId ?? 1 }).catch(() =>

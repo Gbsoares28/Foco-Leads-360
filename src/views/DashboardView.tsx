@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
-import { AlertCircle, ArrowRight, ExternalLink, Plus } from 'lucide-react';
+import { AlertCircle, ArrowRight, Plus } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
-import { StatusIndicator } from '../components/StatusIndicator';
 
 interface DashboardResponse {
   isDemo: boolean;
@@ -23,17 +22,6 @@ interface DashboardResponse {
     label: string;
     minisitesCriados: number;
     visualizacoes: number;
-  }>;
-  recentMinisites: Array<{
-    id: number;
-    title: string;
-    slug: string;
-    status: string;
-    viewsCount: number;
-    updatedAt: string;
-    businessName: string;
-    businessCategory: string;
-    businessCity: string;
   }>;
   alerts: Array<{
     id: string;
@@ -231,83 +219,6 @@ export function DashboardView({ onNavigate }: { onNavigate: (path: string) => vo
         </div>
       </div>
 
-      {/* Recent Minisites */}
-      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-        <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
-          <div>
-            <h2 className="text-base font-semibold text-[#10253D]">Minisites recentes</h2>
-            <p className="text-xs text-slate-500">Últimas páginas criadas ou atualizadas</p>
-          </div>
-          <button
-            type="button"
-            onClick={() => onNavigate('/minisites')}
-            className="inline-flex items-center gap-1 text-xs font-semibold text-[#1677F2] hover:underline cursor-pointer"
-          >
-            <span>Ver todos</span>
-            <ArrowRight className="w-3.5 h-3.5" />
-          </button>
-        </div>
-
-        {data.recentMinisites.length === 0 ? (
-          <div className="p-8 text-center">
-            <p className="text-sm text-slate-600">
-              Nenhum minisite encontrado nesta base.
-            </p>
-            <button
-              type="button"
-              onClick={() => onNavigate('/minisites')}
-              className="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-[#1677F2] text-white text-xs font-semibold cursor-pointer"
-            >
-              <Plus className="w-4 h-4" />
-              <span>Criar primeiro minisite</span>
-            </button>
-          </div>
-        ) : (
-          <div className="divide-y divide-slate-100">
-            {data.recentMinisites.map((item) => (
-              <div
-                key={item.id}
-                className="px-6 py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:bg-slate-50 transition-colors"
-              >
-                <div className="min-w-0">
-                  <div className="text-sm font-semibold text-[#10253D] truncate">{item.title}</div>
-                  <div className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                    <span>{item.businessName}</span>
-                    {item.businessCity && (
-                      <>
-                        <span aria-hidden="true">·</span>
-                        <span>{item.businessCity}</span>
-                      </>
-                    )}
-                    <span aria-hidden="true">·</span>
-                    <span className="font-mono text-[11px]">{item?.slug || ''}</span>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-5 shrink-0">
-                  <StatusIndicator status={item.status} />
-                  <span className="text-xs font-mono text-slate-600 tabular-nums">
-                    {item.viewsCount} views
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      item?.slug &&
-                      onNavigate(
-                        item.status === 'publicado' ? `/${item.slug}` : `/demo/${item.slug}`
-                      )
-                    }
-                    className="inline-flex items-center gap-1 text-xs font-medium text-[#1677F2] hover:underline cursor-pointer"
-                  >
-                    <span>{item.status === 'publicado' ? 'Abrir site' : 'Prévia'}</span>
-                    <ExternalLink className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
     </div>
   );
 }
